@@ -1,0 +1,700 @@
+import SwiftUI
+
+/// The main window: projects, then the project's files, then the source and the
+/// compiled page.
+struct MainView: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HSplitView {
+                ProjectSidebar()
+                    .frame(minWidth: 196, idealWidth: 218, maxWidth: 300)
+
+                content
+                    .frame(minWidth: 640)
+            }
+            Rule()
+            StatusBar()
+        }
+        .toolbar { toolbarContent }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if state.isOpeningProject {
+            LoadingPane(message: "Downloading \(state.selectedProjectName ?? "project")…")
+        } else if state.selectedProjectId != nil {
+            EditorPanes()
+        } else {
+            WelcomePane()
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button {
+                Task { await state.reloadProject() }
+            } label: {
+                Label("Reload from Overleaf", systemImage: "arrow.clockwise")
+            }
+            .disabled(state.selectedProjectId == nil || state.isOpeningProject)
+            .help("Download this project again from Overleaf")
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            SaveControl()
+            CompileControl()
+
+            Picker("Layout", selection: $state.rightPane) {
+                ForEach(RightPane.allCases) { pane in
+                    Text(pane.title).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 188)
+            .help("Show the source, the page, or both")
+        }
+    }
+}
+
+// MARK: - Toolbar controls
+
+private struct SaveControl: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        Button {
+            Task { await state.saveCurrentFile() }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: state.isDirty ? "arrow.up.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(state.isDirty ? Theme.warning : Theme.leaf)
+                Text(state.isDirty ? "Save" : "Saved")
+                    .font(Theme.Typeface.ui(11, .medium))
+            }
+        }
+        .buttonStyle(.borderless)
+        .disabled(!state.isDirty)
+        .help(state.isDirty ? "Send this file to Overleaf (⌘S)" : "No unsaved changes")
+    }
+}
+
+private struct CompileControl: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        Button {
+            Task { await state.saveAndCompile() }
+        } label: {
+            HStack(spacing: 5) {
+                if state.isCompiling {
+                    TinySpinner(size: 10, tint: .white)
+                } else {
+                    Image(systemName: "play.fill").font(.system(size: 9))
+                }
+                Text(state.isCompiling ? "Building" : "Compile")
+                    .font(Theme.Typeface.ui(11, .semibold))
+            }
+        }
+        // `borderedProminent` + tint does not fill with the brand colour inside a
+        // macOS toolbar, so the primary action uses the explicit style.
+        .buttonStyle(PrimaryButtonStyle(compact: true))
+        .disabled(state.selectedProjectId == nil || state.isCompiling)
+        .help("Save and compile on Overleaf (⌘B)")
+    }
+}
+
+// MARK: - Sidebar
+
+/// The project list and the selected project's files in one tree: a project
+/// unfolds to reveal its files, so the window gives its width to the source and
+/// the compiled page instead of a separate file column.
+struct ProjectSidebar: View {
+    @EnvironmentObject private var state: AppState
+    @State private var query = ""
+    @State private var expandedProjectId: String?
+    @State private var expandedFolders: Set<String> = []
+    @State private var isAddingFile = false
+    @State private var newFileName = "section.tex"
+
+    private var filtered: [OverleafProject] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return state.projects }
+        return state.projects.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            SearchField(text: $query)
+            projectList
+            Rule()
+            accountFooter
+        }
+        .background(.thinMaterial)
+        .onAppear {
+            // A project may already be open when this view is rebuilt (switching
+            // Source/Split/PDF recreates it), so restore what was unfolded.
+            if expandedProjectId == nil, let selected = state.selectedProjectId {
+                expandedProjectId = selected
+            }
+            if expandedFolders.isEmpty, let path = state.openPath {
+                expandedFolders = Self.folders(containing: path)
+            }
+        }
+        .onChange(of: state.selectedProjectId) { newValue in
+            Task { await state.projectSelectionChanged(to: newValue) }
+            // A different project means a different tree, so start it unfolded
+            // with only the folders leading to the newly opened file open.
+            expandedFolders = state.openPath.map(Self.folders(containing:)) ?? []
+            if let newValue {
+                if expandedProjectId != newValue {
+                    withAnimation(.easeOut(duration: 0.14)) { expandedProjectId = newValue }
+                }
+            } else {
+                expandedProjectId = nil
+            }
+        }
+        .onChange(of: state.openPath) { path in
+            guard let path else { return }
+            // Reveal the file that was opened, wherever it lives.
+            expandedFolders.formUnion(Self.folders(containing: path))
+        }
+        .sheet(isPresented: $isAddingFile) {
+            NewFileSheet(name: $newFileName, isPresented: $isAddingFile) { name in
+                state.createFile(named: name)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            AppMark(size: 22)
+            Text("Mangrove")
+                .font(Theme.Typeface.display(15))
+            Spacer()
+            Button {
+                Task { await state.refreshProjects() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .disabled(state.isOpeningProject)
+            .help("Reload the project list")
+        }
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.top, 13)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private var projectList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                if filtered.isEmpty {
+                    VStack(spacing: 5) {
+                        Text(state.projects.isEmpty ? "No projects yet" : "No matches")
+                            .font(Theme.Typeface.ui(11, .medium))
+                        Text(state.projects.isEmpty
+                             ? "Projects you own or collaborate on appear here."
+                             : "Try a different name.")
+                            .font(Theme.Typeface.ui(10))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 26)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(filtered) { project in
+                        projectRow(project)
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private func projectRow(_ project: OverleafProject) -> some View {
+        let isExpanded = expandedProjectId == project.id
+        let isSelected = state.selectedProjectId == project.id
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 5) {
+                Button {
+                    toggleExpansion(of: project)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 12, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "Hide files" : "Show files")
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(project.name)
+                        .font(Theme.Typeface.ui(12, isSelected ? .medium : .regular))
+                        .lineLimit(1)
+                    if let subtitle = subtitle(for: project, isExpanded: isExpanded) {
+                        Text(subtitle)
+                            .font(Theme.Typeface.ui(9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 2)
+
+                if isSelected {
+                    Button {
+                        newFileName = "section.tex"
+                        isAddingFile = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add a file to this project")
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isSelected ? Color.primary.opacity(0.09) : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { select(project) }
+
+            if isExpanded {
+                expandedContent
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        if state.isOpeningProject {
+            HStack(spacing: 6) {
+                TinySpinner(size: 9)
+                Text("Loading files…")
+                    .font(Theme.Typeface.ui(10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.leading, 17)
+            .padding(.vertical, 5)
+        } else if state.fileTree.isEmpty {
+            Text("No files yet")
+                .font(Theme.Typeface.ui(10))
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 17)
+                .padding(.vertical, 5)
+        } else {
+            fileTree(nodes: state.fileTree, depth: 0)
+                .padding(.top, 2)
+                .padding(.bottom, 3)
+        }
+    }
+
+    /// Erased because the tree calls itself; there is no non-recursive opaque type
+    /// that could describe it.
+    private func fileTree(nodes: [FileNode], depth: Int) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 1) {
+            ForEach(nodes) { node in
+                if node.isDirectory {
+                    let isOpen = expandedFolders.contains(node.path)
+                    Button {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            if isOpen { expandedFolders.remove(node.path) }
+                            else { expandedFolders.insert(node.path) }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 8)
+                            Image(systemName: "folder")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.leafMuted)
+                            Text(node.name)
+                                .font(Theme.Typeface.ui(11, .medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, CGFloat(depth) * 12 + 18)
+                        .padding(.trailing, 6)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if isOpen {
+                        fileTree(nodes: node.children, depth: depth + 1)
+                    }
+                } else {
+                    fileRow(node, depth: depth)
+                }
+            }
+        })
+    }
+
+    @ViewBuilder
+    private func fileRow(_ node: FileNode, depth: Int) -> some View {
+        let isOpen = state.openPath == node.path
+        let isUnsaved = state.unsavedFiles.contains(node.path)
+
+        Button {
+            if !isOpen { state.openFile(node.path) }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: FileRowSymbols.symbol(for: node.name))
+                    .font(.system(size: 10))
+                    .foregroundStyle(isOpen ? Theme.leaf : Color.secondary)
+                    .frame(width: 12)
+                Text(node.name)
+                    .font(Theme.Typeface.ui(11, isOpen ? .medium : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 2)
+                if isUnsaved {
+                    Circle()
+                        .fill(Theme.warning)
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .padding(.leading, CGFloat(depth) * 12 + 30)
+            .padding(.trailing, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(isOpen ? Theme.leaf.opacity(0.14) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Open") { state.openFile(node.path) }
+            Button("Remove Locally") { state.deleteFile(node.path) }
+        }
+    }
+
+    private var accountFooter: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(state.isSignedIn ? Theme.leaf : Color.secondary)
+                .frame(width: 5, height: 5)
+            Text(state.session?.host ?? "Not signed in")
+                .font(Theme.Typeface.ui(10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 2)
+            Menu {
+                Button("Reload Projects") {
+                    Task { await state.refreshProjects() }
+                }
+                Divider()
+                Button("Sign Out") { state.signOut() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 20)
+        }
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: Actions
+
+    private func select(_ project: OverleafProject) {
+        if state.selectedProjectId != project.id {
+            state.selectedProjectId = project.id
+        }
+        if expandedProjectId != project.id {
+            withAnimation(.easeOut(duration: 0.14)) { expandedProjectId = project.id }
+        }
+    }
+
+    private func toggleExpansion(of project: OverleafProject) {
+        if expandedProjectId == project.id {
+            withAnimation(.easeOut(duration: 0.14)) { expandedProjectId = nil }
+        } else {
+            select(project)
+        }
+    }
+
+    private func subtitle(for project: OverleafProject, isExpanded: Bool) -> String? {
+        var parts: [String] = []
+        if isExpanded, !state.isOpeningProject {
+            parts.append("\(fileCount) \(fileCount == 1 ? "file" : "files")")
+        }
+        if let access = Self.accessLabel(for: project) {
+            parts.append(access)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var fileCount: Int {
+        func count(_ nodes: [FileNode]) -> Int {
+            nodes.reduce(0) { total, node in
+                total + (node.isDirectory ? count(node.children) : 1)
+            }
+        }
+        return count(state.fileTree)
+    }
+
+    private static func accessLabel(for project: OverleafProject) -> String? {
+        guard let access = project.accessLevel, access != "owner" else { return nil }
+        switch access {
+        case "readAndWrite", "readWrite": return "Shared"
+        case "readOnly": return "Read only"
+        default: return access.capitalized
+        }
+    }
+
+    /// Folder paths that contain a file, so it can be revealed when opened.
+    static func folders(containing path: String) -> Set<String> {
+        var result: Set<String> = []
+        var components = path.split(separator: "/").map(String.init)
+        components.removeLast()
+        var prefix: [String] = []
+        for component in components {
+            prefix.append(component)
+            result.insert(prefix.joined(separator: "/"))
+        }
+        return result
+    }
+}
+
+/// The symbols used for files in the tree, shared with the editor header.
+enum FileRowSymbols {
+    static func symbol(for name: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "tex", "ltx", "latex": return "doc.text"
+        case "bib": return "text.book.closed"
+        case "pdf": return "doc.richtext"
+        case "png", "jpg", "jpeg", "gif", "svg", "eps", "ps": return "photo"
+        case "sty", "cls", "def": return "shippingbox"
+        default: return "doc"
+        }
+    }
+}
+
+struct NewFileSheet: View {
+    @Binding var name: String
+    @Binding var isPresented: Bool
+    let onCreate: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("New file")
+                .font(Theme.Typeface.display(15))
+            TextField("section.tex", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(Theme.Typeface.mono(12))
+                .frame(width: 280)
+            Text("Use a slash to place it in a folder, relative to the project root.")
+                .font(Theme.Typeface.ui(10))
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    onCreate(name)
+                    isPresented = false
+                }
+                .buttonStyle(PrimaryButtonStyle(compact: true))
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Editor and build panes
+
+struct EditorPanes: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        switch state.rightPane {
+        case .editor:
+            EditorPane()
+        case .pdf:
+            BuildPane()
+        case .split:
+            HSplitView {
+                EditorPane().frame(minWidth: 300, idealWidth: 620)
+                BuildPane().frame(minWidth: 320, idealWidth: 600)
+            }
+        }
+    }
+}
+
+struct EditorPane: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let path = state.openPath {
+                documentHead(path: path)
+                Rule()
+                SourceEditor(text: Binding(
+                    get: { state.editorText },
+                    set: { state.editorTextChanged($0) }
+                ))
+                Rule()
+                documentFooter
+            } else {
+                EmptyState(
+                    icon: "text.cursor",
+                    title: "No file open",
+                    detail: "Choose a file in the project to start editing."
+                )
+            }
+        }
+    }
+
+    private func documentHead(path: String) -> some View {
+        let folder = (path as NSString).deletingLastPathComponent
+        let name = (path as NSString).lastPathComponent
+        return HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(name).font(Theme.Typeface.ui(11, .semibold))
+                    if state.isDirty {
+                        Circle().fill(Theme.warning).frame(width: 5, height: 5)
+                    }
+                }
+                if !folder.isEmpty {
+                    Text(folder)
+                        .font(Theme.Typeface.ui(9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.vertical, 8)
+    }
+
+    private var documentFooter: some View {
+        HStack(spacing: 12) {
+            Text("\(state.wordCount) words")
+            Text("\(state.lineCount) lines")
+            Spacer()
+            if state.isDirty {
+                Text("⌘S to save")
+                    .foregroundStyle(Theme.warning)
+            }
+        }
+        .font(Theme.Typeface.ui(9))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.vertical, 5)
+    }
+}
+
+// MARK: - Welcome
+
+struct WelcomePane: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 12) {
+                AppMark(size: 76)
+                VStack(spacing: 5) {
+                    Text("Mangrove")
+                        .font(Theme.Typeface.display(25))
+                    Text("Write LaTeX and compile without leaving your desktop.")
+                        .font(Theme.Typeface.ui(12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                ShortcutHint(keys: "⌘B", label: "Save and compile the project")
+                ShortcutHint(keys: "⌘S", label: "Send the open file to Overleaf")
+                ShortcutHint(keys: "⌘R", label: "Reload the project from Overleaf")
+            }
+            .padding(.top, 4)
+
+            Text(state.projects.isEmpty
+                 ? "No projects yet — anything you own or collaborate on will appear on the left."
+                 : "Choose a project on the left to begin.")
+                .font(Theme.Typeface.ui(11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct ShortcutHint: View {
+    let keys: String
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(keys)
+                .font(Theme.Typeface.mono(10, .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .leading)
+            Text(label)
+                .font(Theme.Typeface.ui(11))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Status bar
+
+struct StatusBar: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if !state.unsavedFiles.isEmpty {
+                Text("\(state.unsavedFiles.count) unsaved")
+                    .font(Theme.Typeface.ui(9.5, .medium))
+                    .foregroundStyle(Theme.warning)
+            }
+
+            Spacer()
+
+            if let status = state.statusMessage {
+                Text(status)
+                    .font(Theme.Typeface.ui(9.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.vertical, 5)
+        .background(.bar)
+    }
+}
