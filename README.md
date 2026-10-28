@@ -2,9 +2,10 @@
 
 Mangrove is a native macOS client for [Overleaf](https://www.overleaf.com): browse your projects,
 edit LaTeX in a real desktop editor, compile on Overleaf's servers and read the
-resulting PDF — without a browser tab. It is a SwiftUI app (Swift Package Manager,
-no Xcode project required) using `URLSession`, `WKWebView`, `PDFKit` and the macOS
-Keychain.
+resulting PDF — without a browser tab. It keeps working when the network is gone,
+and merges a collaborator's saved changes instead of overwriting them. It is a
+SwiftUI app (Swift Package Manager, no Xcode project required) using `URLSession`,
+`WKWebView`, `PDFKit` and the macOS Keychain.
 
 > Unofficial and not affiliated with Overleaf.
 
@@ -53,15 +54,37 @@ later launches. Sign out from **Project → Sign Out** to remove it.
 - **Local working copy** — opening a project downloads it once, so the file tree
   and editor respond instantly.
 - **Native editor** for `.tex`, `.bib`, `.sty` and other text files, with
-  monospaced type, word and line counts, and unsaved markers in the file tree and
-  toolbar.
+  monospaced type, syntax colouring, word and line counts, and unsaved markers in
+  the file tree and toolbar.
+- **Visual mode** for `.tex` files — **Code / Visual** in the document header, or
+  ⌥⌘E. Headings, paragraphs, lists and inline emphasis appear as a typeset page
+  you can type into; the `.tex` file stays the source of truth and is rewritten
+  in place as you edit (see [Visual editing](#visual-editing)).
+- **Uploading** — **⌘⇧U**, or the plus menu beside the selected project, adds
+  files from disk: figures, `.bib` files, classes, anything. They are copied into
+  the working copy and sent like an edit, so an upload made offline waits in the
+  same queue and arrives on reconnect. A folder's context menu uploads straight
+  into that folder; otherwise files land beside the open file.
 - **Compile** on Overleaf's own servers (draft mode included) and read the PDF in
-  a native `PDFKit` view; the build log is one click away, and switching to it is
-  automatic when a build fails.
-- **Saving** — ⌘S uploads the open file over the same authenticated route the web
-  editor uses, and ⌘B saves every changed file before compiling. Changes are
-  written to the local working copy the moment you switch files, so nothing is
-  lost, and **⌘⇧C copies the open file** to the clipboard.
+  a native `PDFKit` view. The build pane has three tabs — **PDF**, **Problems**
+  and **Log** — and a failed build switches to Problems automatically. Each problem
+  carries its file and line, and clicking one opens the file at that line; the raw
+  log is still there, one tab away.
+- **Saving** — ⌘S writes the file to the working copy and uploads it, and ⌘B
+  saves every changed file before compiling. Typing is mirrored to disk shortly
+  after you stop, so a crash cannot lose it; **⌘⇧C copies the open file** to the
+  clipboard.
+- **Offline editing** — with no connection, saves go to a queue written to disk
+  that survives quitting. It is pushed automatically the moment the connection
+  returns, and the status bar shows how many files are waiting.
+- **Merging** — before every upload the app re-reads the project and compares it
+  with the copy it last saw. If someone saved in the meantime, the two versions
+  are merged line by line against that common ancestor instead of one silently
+  replacing the other. Regions both sides changed are shown side by side and you
+  choose what to keep; nothing is uploaded until you decide.
+- **Offline compiling** — when Overleaf is unreachable and a TeX distribution is
+  installed on this Mac, ⌘B compiles locally and shows the PDF as usual. Without
+  TeX the compile is queued and runs when the connection returns.
 - **Non-blocking notices** — problems appear as a dismissible banner instead of an
   alert, so they never interrupt what you are typing.
 
@@ -69,8 +92,71 @@ later launches. Sign out from **Project → Sign Out** to remove it.
 |---|---|
 | ⌘B | Save and compile |
 | ⌘S | Save the current file to Overleaf |
+| ⌥⌘E | Switch between Code and Visual editing |
+| ⌘⇧U | Upload files from disk |
+| ⌘⇧S | Sync queued changes now |
+| ⌥⌘B | Compile locally (requires TeX on this Mac) |
 | ⌘⇧C | Copy the open file to the clipboard |
 | ⌘R | Reload the project from Overleaf |
+
+## Offline editing and merging
+
+The working copy is not a cache: `~/Library/Application Support/Mangrove/Projects/<id>`
+is the document while you edit, and `State/<id>.json` records which files differ
+from what Overleaf has. Both survive quitting, so a dropped connection costs you a
+sync, not your work. A queued compile is stored in the same place.
+
+Every upload starts by downloading the project archive again. Comparing that with
+the last remote copy the app saw (`Bases/<id>` — the merge base) and with the local
+file gives one of four outcomes:
+
+| Local | Remote | Result |
+|---|---|---|
+| unchanged | changed | take Overleaf's copy |
+| changed | unchanged | upload |
+| changed | changed elsewhere | merge both |
+| changed same lines | changed same lines | ask, region by region |
+
+The merge is ordinary `diff3`: edits to separate lines combine, and only
+overlapping ones become conflicts. A conflict never blocks the file — the local
+copy stays exactly as it was until you open **Project → Resolve Merge Conflicts…**.
+
+Two honest limits. This is merge-on-save, not Overleaf's live collaboration: edits
+someone is making in the browser without saving are invisible here. And because an
+upload replaces the whole file, a save that lands on Overleaf in the moment between
+this app's download and its upload is not part of the comparison — the window is
+one upload, not the whole session.
+
+Local compilation needs a TeX installation; nothing is bundled. `latexmk` is
+preferred, with `pdflatex` plus `bibtex` as a fallback, and the search covers
+MacTeX/BasicTeX (`/Library/TeX/texbin`), Homebrew, MacPorts, TinyTeX under
+`~/Library/TinyTeX` and TeX Live under `/usr/local/texlive`.
+
+## Visual editing
+
+Visual mode is a formatted view of the file you already have open, not a second
+format: the `.tex` source is authoritative and the visual page is generated from
+it on every change. There is no import step and nothing is stored twice.
+
+Every construct the parser recognises remembers the exact source range it came
+from, so editing a heading rewrites only that heading's argument. A paragraph edit
+replaces the paragraph's text, inline formatting is translated back to `\emph{}`,
+`\textbf{}` and friends, and a list item is rewritten in place. Anything the
+parser cannot model safely — an unknown environment, raw macros, a figure — is
+shown as a read-only card with **Edit in Code** next to it; selecting it in code
+and returning to Visual resumes editing around it. Comments in the preamble and
+between blocks survive untouched, as does the layout of everything you did not
+edit.
+
+This is deliberately not a full LaTeX editor. It handles the structure of an
+ordinary paper — title, headings, paragraphs, itemised and enumerated lists,
+definitions, verbatim blocks, figures, tables, display math, and the common
+inline markup — and treats everything else as opaque source rather than guessing.
+Multi-paragraph list items are left to code mode, because rewriting them visually
+would change where the `\item` boundaries fall. If a file contains a construct that
+cannot round-trip, the visual pane says so instead of silently dropping it.
+
+![Visual mode: the same file as a formatted page](Screenshots/visual-mode.png)
 
 ## How it works
 
@@ -145,11 +231,15 @@ Three things this app has to do that are easy to get wrong:
   app. It is designed to fail with a clear message rather than corrupt a project.
 - **No live collaboration.** The socket is used only to read the project's folder
   id, then closed: this app does not run Overleaf's operational-transform
-  protocol, so you will not see collaborators' cursors or edits appear live. Save
-  and reload to pick up changes they made.
+  protocol, so you will not see collaborators' cursors or edits appear live.
+  Saving merges whatever they have already saved; see
+  [Offline editing and merging](#offline-editing-and-merging).
 - **No file deletion or renaming** yet — the upload route can add and replace
   files, but there is no equivalent for removing them. Delete in Overleaf, then
   reload.
+- **Uploads replace same-named files.** Choosing a file whose name already exists
+  in the target folder replaces it, with no rename prompt. Files over Overleaf's
+  50 MB limit are refused before anything is sent.
 - **Saving writes whole files.** An edit replaces the document's contents rather
   than applying an operation at a position, so history records a single replace
   for that save instead of fine-grained typing.
@@ -188,13 +278,24 @@ Sources/Mangrove/
   OverleafClient.swift      HTTP client: session, CSRF, zip, upload, compile
   RealtimeClient.swift      socket.io 0.9 over raw HTTP/1.1; folder ids, diagnostics
   SessionStore.swift        Keychain-backed session and cookie handling
-  ProjectWorkspace.swift    Local working copy (unpack, tree, read/write)
-  AppState.swift            Session lifecycle, saving and the compile flow
+  ProjectWorkspace.swift    Working copy, merge bases, persisted pending state
+  FileImport.swift          Where files chosen from disk land in a project
+  VisualDocument.swift      Parses .tex into blocks with exact source ranges
+  InlineLaTeX.swift         Inline markup ⇄ attributed text, and the rewriter
+  BuildDiagnostics.swift    TeX log and validation problems → ordered diagnostics
+  LineMerge.swift           diff3 merge, sync decisions, offline classification
+  LocalLaTeX.swift          Finds and runs a local TeX toolchain
+  NetworkMonitor.swift      Path monitoring that triggers queued sync
+  AppState.swift            Session lifecycle, saving, merging, offline queue
   Models.swift              Projects, output files, file tree, errors
   Views/Theme.swift         Design tokens, the app mark, shared components
   Views/SourceEditor.swift  LaTeX editor (NSTextView) and its highlighting
+  Views/VisualEditor.swift  The visual page, format bar and inline text views
+  Views/BuildPane.swift     PDF / Problems / Log tabs, jump-to-source
+  Views/MergeConflictView.swift  Side-by-side conflict resolution
   Views/                    SwiftUI: sign-in, sidebar, editor, PDFKit pane
-Tests/MangroveTests/ Session/cookie handling, archive unpacking, wire format
+Tests/MangroveTests/ Session/cookie handling, diff3, sync planning, offline builds,
+                     visual round-trip, build diagnostics
 scripts/make-icon.swift     Renders the app icon (green tile + leaf mark)
 scripts/build-app.sh        Builds and assembles the .app bundle
 Screenshots/                Rendered views used in this README
