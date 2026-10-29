@@ -75,6 +75,12 @@ final class RenderSnapshot: XCTestCase {
         state.openPath = "SGF-Paper_SIURO.tex"
         state.editorText = sample
         state.isDirty = true
+        // Two open files so the tab strip, including the active dirty marker, is
+        // part of the layout check.
+        state.openDocuments = [
+            OpenDocument(path: "SGF-Paper_SIURO.tex", text: sample, savedText: sample, isDirty: true),
+            OpenDocument(path: "README.txt", text: "Project notes", savedText: "Project notes", isDirty: false),
+        ]
 
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             try render(
@@ -115,6 +121,9 @@ final class RenderSnapshot: XCTestCase {
         state.editorText = sample
         state.editorMode = .visual
         state.isDirty = true
+        state.openDocuments = [
+            OpenDocument(path: "SGF-Paper_SIURO.tex", text: sample, savedText: sample, isDirty: true),
+        ]
 
         try render(
             MainView().environmentObject(state),
@@ -139,7 +148,7 @@ final class RenderSnapshot: XCTestCase {
     }
 
     func testRenderMergeSheet() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["OVERLEAF_RENDER_SNAPSHOTS"] == "1")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["MANGROVE_RENDER_SNAPSHOTS"] == "1")
 
         let base = "The method begins with a direction\nthat decreases the objective.\n"
         let mine = "The method begins with a direction\nthat decreases the loss quickly.\n"
@@ -164,7 +173,7 @@ final class RenderSnapshot: XCTestCase {
     }
 
     func testRenderOfflineStatusBar() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["OVERLEAF_RENDER_SNAPSHOTS"] == "1")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["MANGROVE_RENDER_SNAPSHOTS"] == "1")
 
         let state = AppState()
         state.isOnline = false
@@ -258,6 +267,38 @@ final class RenderSnapshot: XCTestCase {
             size: NSSize(width: 540, height: 640),
             appearance: NSAppearance(named: .aqua),
             to: ".work/problems.png"
+        )
+    }
+
+    /// The new project tools are sheets, so they cannot be reached from the main
+    /// window snapshot. Render them once to make sure their chrome lays out.
+    func testRenderProjectTools() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["MANGROVE_RENDER_SNAPSHOTS"] == "1")
+
+        let state = AppState()
+        state.isSignedIn = true
+        state.openPath = "SGF-Paper_SIURO.tex"
+        state.editorText = sample
+        state.editorMode = .code
+
+        try render(
+            ProjectSearchSheet().environmentObject(state),
+            size: NSSize(width: 660, height: 500),
+            appearance: NSAppearance(named: .aqua),
+            to: ".work/project-search.png"
+        )
+        try render(
+            HistorySheet().environmentObject(state),
+            size: NSSize(width: 780, height: 540),
+            appearance: NSAppearance(named: .aqua),
+            to: ".work/history.png"
+        )
+        try render(
+            RenameSheet(request: FileNameRequest(path: "sections/method.tex", isFolder: false))
+                .environmentObject(state),
+            size: NSSize(width: 420, height: 240),
+            appearance: NSAppearance(named: .aqua),
+            to: ".work/rename.png"
         )
     }
 

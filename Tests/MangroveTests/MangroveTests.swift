@@ -177,6 +177,25 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(try workspace.readText("main.tex"), "changed")
     }
 
+    func testMovingAFolderCarriesPendingEditsAndBases() throws {
+        try workspace.writeText("main.tex", text: "first")
+        workspace.saveBase("main.tex", data: Data("base".utf8))
+        try workspace.moveItem(from: "main.tex", to: "chapters/main.tex")
+
+        XCTAssertEqual(try workspace.readText("chapters/main.tex"), "first")
+        XCTAssertEqual(workspace.modifiedPaths, ["chapters/main.tex"])
+        XCTAssertEqual(workspace.baseData("chapters/main.tex"), Data("base".utf8))
+        XCTAssertNil(workspace.baseData("main.tex"))
+
+        try workspace.createDirectory("figures")
+        XCTAssertTrue(workspace.fileExists("figures"))
+
+        try workspace.removeItem(at: "chapters")
+        XCTAssertFalse(workspace.fileExists("chapters"))
+        XCTAssertTrue(workspace.modifiedPaths.isEmpty)
+        XCTAssertNil(workspace.baseData("chapters/main.tex"))
+    }
+
     func testTreeGroupsNestedFolders() {
         let files = [
             FileNode(path: "main.tex", name: "main.tex", isDirectory: false, children: []),
