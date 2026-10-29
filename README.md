@@ -9,7 +9,7 @@ SwiftUI app (Swift Package Manager, no Xcode project required) using `URLSession
 
 > Unofficial and not affiliated with Overleaf.
 
-![The main window, light mode](Screenshots/main-window.png)
+![The main window, light mode](Screenshots/editor-dark.png)
 
 ## Requirements
 
