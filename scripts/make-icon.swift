@@ -1,7 +1,8 @@
 #!/usr/bin/env swift
 //
-// Renders the app icon: a green tile with the printed-leaf mark that Mangrove
-// also draws in SwiftUI (Theme.swift's `LeafMark`).
+// Renders the app icon: a mangrove tree standing on its arching prop roots in
+// shallow water, on a deep tidal-green tile. The same geometry is drawn in
+// SwiftUI by Theme.swift's `MangroveMark`.
 //
 //   swift scripts/make-icon.swift out.png [size]
 //
@@ -60,7 +61,7 @@ ctx.clip()
 
 let gradient = CGGradient(
     colorsSpace: space,
-    colors: [rgb(56, 185, 104), rgb(20, 140, 66), rgb(9, 88, 43)] as CFArray,
+    colors: [rgb(44, 156, 116), rgb(16, 104, 75), rgb(7, 54, 45)] as CFArray,
     locations: [0.0, 0.55, 1.0]
 )!
 ctx.drawLinearGradient(
@@ -105,67 +106,202 @@ ctx.drawLinearGradient(
 )
 ctx.restoreGState()
 
-// MARK: - Leaf mark
+// MARK: - Tidal water
 
-let center = CGPoint(x: S * 0.5, y: S * 0.505)
-let halfHeight = tile.height * 0.305
-let halfWidth = tile.width * 0.225
-
-let tipTop = CGPoint(x: center.x, y: center.y + halfHeight)
-let tipBottom = CGPoint(x: center.x, y: center.y - halfHeight)
-
-let leaf = CGMutablePath()
-leaf.move(to: tipBottom)
-// Left edge, bowing outward.
-leaf.addCurve(
-    to: tipTop,
-    control1: CGPoint(x: center.x - halfWidth * 1.42, y: center.y - halfHeight * 0.62),
-    control2: CGPoint(x: center.x - halfWidth * 1.42, y: center.y + halfHeight * 0.62)
-)
-// Right edge, bowing outward.
-leaf.addCurve(
-    to: tipBottom,
-    control1: CGPoint(x: center.x + halfWidth * 1.42, y: center.y + halfHeight * 0.62),
-    control2: CGPoint(x: center.x + halfWidth * 1.42, y: center.y - halfHeight * 0.62)
-)
-leaf.closeSubpath()
-
+// A darker band below the waterline gives the roots something to stand in.
 ctx.saveGState()
-ctx.setShadow(offset: CGSize(width: 0, height: -S * 0.006), blur: S * 0.016,
-              color: CGColor(srgbRed: 0, green: 40, blue: 18, alpha: 0.35))
-ctx.addPath(leaf)
-ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-ctx.fillPath()
-ctx.restoreGState()
-
-// Diagonal fold: light from the upper left, so the leaf reads as folded paper.
-ctx.saveGState()
-ctx.addPath(leaf)
+ctx.addPath(tilePath)
 ctx.clip()
-let fold = CGGradient(
+let water = CGGradient(
     colorsSpace: space,
-    colors: [CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0),
-             CGColor(srgbRed: 205 / 255, green: 236 / 255, blue: 217 / 255, alpha: 1)] as CFArray,
-    locations: [0.35, 1.0]
+    colors: [CGColor(srgbRed: 3, green: 38, blue: 34, alpha: 0),
+             CGColor(srgbRed: 3, green: 38, blue: 34, alpha: 0.32)] as CFArray,
+    locations: [0.0, 1.0]
 )!
 ctx.drawLinearGradient(
-    fold,
-    start: CGPoint(x: center.x - halfWidth * 0.9, y: center.y + halfHeight * 0.7),
-    end: CGPoint(x: center.x + halfWidth * 1.1, y: center.y - halfHeight * 0.8),
+    water,
+    start: CGPoint(x: 0, y: S * 0.31),
+    end: CGPoint(x: 0, y: tile.minY),
     options: []
 )
 ctx.restoreGState()
 
-// Single central vein, stopping short of both tips.
+// MARK: - Mangrove canopy
+
+// Coarse coordinates are deliberate: the canopy is a low, three-lobed coastal
+// crown rather than a generic round tree. All of it is drawn white so the mark
+// still reads when the icon is scaled to 16pt.
+// The crown is a union of overlapping rounded masses, the way a mangrove's
+// several stems each push up their own clump of leaves. Filling them as one path
+// keeps a single silhouette (and a single shadow) with no seams between lobes.
+let canopy = CGMutablePath()
+canopy.addEllipse(in: CGRect(
+    x: S * 0.235, y: S * 0.545, width: S * 0.530, height: S * 0.155
+))
+canopy.addEllipse(in: CGRect(
+    x: S * 0.245, y: S * 0.585, width: S * 0.175, height: S * 0.165
+))
+canopy.addEllipse(in: CGRect(
+    x: S * 0.360, y: S * 0.625, width: S * 0.195, height: S * 0.190
+))
+canopy.addEllipse(in: CGRect(
+    x: S * 0.480, y: S * 0.635, width: S * 0.190, height: S * 0.190
+))
+canopy.addEllipse(in: CGRect(
+    x: S * 0.595, y: S * 0.610, width: S * 0.175, height: S * 0.175
+))
+canopy.addEllipse(in: CGRect(
+    x: S * 0.660, y: S * 0.575, width: S * 0.120, height: S * 0.140
+))
+// Rounds the left shoulder where the outer lobe meets the base, so the crown
+// does not have a visible notch at nine o'clock.
+canopy.addEllipse(in: CGRect(
+    x: S * 0.225, y: S * 0.555, width: S * 0.190, height: S * 0.120
+))
+
 ctx.saveGState()
-ctx.addPath(leaf)
+ctx.setShadow(offset: CGSize(width: 0, height: -S * 0.007), blur: S * 0.014,
+              color: CGColor(srgbRed: 0, green: 30, blue: 22, alpha: 0.32))
+ctx.addPath(canopy)
+ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+ctx.fillPath()
+ctx.restoreGState()
+
+// The underside cools very slightly, so the crown has volume without a gloss.
+ctx.saveGState()
+ctx.addPath(canopy)
 ctx.clip()
-ctx.setLineWidth(max(1, S * 0.0085))
+let foliage = CGGradient(
+    colorsSpace: space,
+    colors: [CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
+             CGColor(srgbRed: 222 / 255, green: 242 / 255, blue: 230 / 255, alpha: 1)] as CFArray,
+    locations: [0.0, 1.0]
+)!
+ctx.drawLinearGradient(
+    foliage,
+    start: CGPoint(x: 0, y: S * 0.79),
+    end: CGPoint(x: 0, y: S * 0.54),
+    options: []
+)
+ctx.restoreGState()
+
+// MARK: - Trunk and prop roots
+
+ctx.saveGState()
+ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+
+// A short, sturdy trunk; the roots take over below it. The crown sits close to
+// the water, which is what stops the silhouette reading as a mushroom.
+let trunk = CGMutablePath()
+trunk.move(to: CGPoint(x: S * 0.470, y: S * 0.570))
+trunk.addLine(to: CGPoint(x: S * 0.530, y: S * 0.570))
+trunk.addCurve(
+    to: CGPoint(x: S * 0.545, y: S * 0.455),
+    control1: CGPoint(x: S * 0.530, y: S * 0.525),
+    control2: CGPoint(x: S * 0.538, y: S * 0.485)
+)
+trunk.addLine(to: CGPoint(x: S * 0.455, y: S * 0.455))
+trunk.addCurve(
+    to: CGPoint(x: S * 0.470, y: S * 0.570),
+    control1: CGPoint(x: S * 0.462, y: S * 0.485),
+    control2: CGPoint(x: S * 0.470, y: S * 0.525)
+)
+trunk.closeSubpath()
+ctx.addPath(trunk)
+ctx.fillPath()
+ctx.restoreGState()
+
+// Five arching roots: the silhouette that distinguishes a mangrove from an
+// ordinary tree. The middle root is the trunk continuing into the water.
+func drawRoot(
+    from start: CGPoint,
+    to end: CGPoint,
+    control1: CGPoint,
+    control2: CGPoint,
+    width: CGFloat
+) {
+    let root = CGMutablePath()
+    root.move(to: start)
+    root.addCurve(to: end, control1: control1, control2: control2)
+    ctx.saveGState()
+    ctx.setLineWidth(width)
+    ctx.setLineCap(.round)
+    ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+    ctx.addPath(root)
+    ctx.strokePath()
+    ctx.restoreGState()
+}
+
+let rootWidth = max(1, S * 0.038)
+let waterLine = S * 0.272
+
+// A waterline sits behind the roots, so their tips disappear into the tile
+// instead of stopping in mid-air.
+ctx.saveGState()
+ctx.setLineWidth(max(1, S * 0.006))
 ctx.setLineCap(.round)
-ctx.setStrokeColor(rgb(20, 112, 56, 0.42))
-ctx.move(to: CGPoint(x: center.x, y: center.y - halfHeight * 0.62))
-ctx.addLine(to: CGPoint(x: center.x, y: center.y + halfHeight * 0.42))
+ctx.setStrokeColor(CGColor(srgbRed: 198 / 255, green: 236 / 255, blue: 219 / 255, alpha: 0.26))
+ctx.move(to: CGPoint(x: S * 0.235, y: waterLine))
+ctx.addLine(to: CGPoint(x: S * 0.765, y: waterLine))
 ctx.strokePath()
+ctx.restoreGState()
+
+// The long outer arches.
+drawRoot(
+    from: CGPoint(x: S * 0.466, y: S * 0.470),
+    to: CGPoint(x: S * 0.305, y: waterLine),
+    control1: CGPoint(x: S * 0.430, y: S * 0.465),
+    control2: CGPoint(x: S * 0.310, y: S * 0.390),
+    width: rootWidth
+)
+drawRoot(
+    from: CGPoint(x: S * 0.534, y: S * 0.470),
+    to: CGPoint(x: S * 0.695, y: waterLine),
+    control1: CGPoint(x: S * 0.570, y: S * 0.465),
+    control2: CGPoint(x: S * 0.690, y: S * 0.390),
+    width: rootWidth
+)
+
+// The two inner braces.
+drawRoot(
+    from: CGPoint(x: S * 0.484, y: S * 0.458),
+    to: CGPoint(x: S * 0.412, y: S * 0.262),
+    control1: CGPoint(x: S * 0.462, y: S * 0.430),
+    control2: CGPoint(x: S * 0.412, y: S * 0.335),
+    width: rootWidth * 0.84
+)
+drawRoot(
+    from: CGPoint(x: S * 0.516, y: S * 0.458),
+    to: CGPoint(x: S * 0.588, y: S * 0.262),
+    control1: CGPoint(x: S * 0.538, y: S * 0.430),
+    control2: CGPoint(x: S * 0.588, y: S * 0.335),
+    width: rootWidth * 0.84
+)
+drawRoot(
+    from: CGPoint(x: S * 0.500, y: S * 0.455),
+    to: CGPoint(x: S * 0.500, y: S * 0.252),
+    control1: CGPoint(x: S * 0.508, y: S * 0.400),
+    control2: CGPoint(x: S * 0.492, y: S * 0.320),
+    width: rootWidth * 0.90
+)
+
+// MARK: - Ripples
+
+// Shortening strokes read as water at every size and keep the roots from
+// appearing to float above the tile.
+ctx.saveGState()
+ctx.setLineCap(.round)
+for ripple in [
+    (y: S * 0.248, width: S * 0.380, alpha: 0.32),
+    (y: S * 0.216, width: S * 0.270, alpha: 0.24),
+    (y: S * 0.188, width: S * 0.160, alpha: 0.18),
+] {
+    ctx.setLineWidth(max(1, S * 0.007))
+    ctx.setStrokeColor(CGColor(srgbRed: 198 / 255, green: 236 / 255, blue: 219 / 255, alpha: ripple.alpha))
+    ctx.move(to: CGPoint(x: S * 0.5 - ripple.width / 2, y: ripple.y))
+    ctx.addLine(to: CGPoint(x: S * 0.5 + ripple.width / 2, y: ripple.y))
+    ctx.strokePath()
+}
 ctx.restoreGState()
 
 // MARK: - Write PNG

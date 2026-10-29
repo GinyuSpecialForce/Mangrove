@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
 APP_NAME="Mangrove"
 BUNDLE_ID="com.mangrovedesktop.app"
-VERSION="1.0"
+VERSION="2.0"
 BINARY=".build/${CONFIG}/Mangrove"
 OUT="build/${APP_NAME}.app"
 
