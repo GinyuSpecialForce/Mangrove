@@ -53,9 +53,30 @@ later launches. Sign out from **Project → Sign Out** to remove it.
   badge for projects you only have read access to.
 - **Local working copy** — opening a project downloads it once, so the file tree
   and editor respond instantly.
+- **Tabs and an outline** — open files stay open in a tab strip (⌥⌘W closes the
+  active one), and the sidebar switches between **Files** and an **Outline** of
+  the current document's parts, chapters and sections, with a word count for
+  each. Clicking a heading takes the source there.
+- **Citation and reference completion** — typing `{` inside `\cite`, `\citep`,
+  `\ref`, `\autoref` and friends offers the keys in the project's `.bib` files
+  and the labels in its documents, so a typo cannot silently become `??`.
+- **Find in project** — ⇧⌘F searches every text file, shows the line and a
+  preview, and replaces all matches in one operation (which then saves and
+  merges like any other edit).
 - **Native editor** for `.tex`, `.bib`, `.sty` and other text files, with
   monospaced type, syntax colouring, word and line counts, and unsaved markers in
   the file tree and toolbar.
+- **Writing assistance** — pressing Return after a complete `\begin{...}` line
+  inserts the matching `\end{...}` and leaves the caret in the body; typing the
+  closing `}` of the begin line does the same. Tab expands LaTeX snippets
+  (`\fig`, `\tab`, `\frac`, `\cite`, `section`, …) with the caret in the first
+  argument.
+- **Live writing checks** — the file is checked locally shortly after you stop
+  typing: unbalanced braces, unclosed or mismatched environments, duplicate
+  labels, and references or citations with no target. When
+  [ChkTeX](https://www.nongnu.org/chktex/) is installed, its typographic warnings
+  are folded in. Results appear under Problems in the build pane, separate from
+  compiler errors, and never require a compile.
 - **Visual mode** for `.tex` files — **Code / Visual** in the document header, or
   ⌥⌘E. Headings, paragraphs, lists and inline emphasis appear as a typeset page
   you can type into; the `.tex` file stays the source of truth and is rewritten
@@ -69,7 +90,34 @@ later launches. Sign out from **Project → Sign Out** to remove it.
   a native `PDFKit` view. The build pane has three tabs — **PDF**, **Problems**
   and **Log** — and a failed build switches to Problems automatically. Each problem
   carries its file and line, and clicking one opens the file at that line; the raw
-  log is still there, one tab away.
+  log is still there, one tab away. **Export PDF** in the build pane (or ⇧⌘E)
+  saves the compiled page wherever you like, named after the project.
+- **Idle compile** — with the page visible, typing pauses for about twenty seconds
+  and the document rebuilds on its own. The previous page stays on screen while
+  the new one downloads, and the viewer keeps its page, scroll position and zoom
+  across the rebuild. The build pane shows **Auto-compiled** rather than pulling
+  you to another tab. Toggle it in **Project → Auto Compile**; ⌘B still compiles
+  on demand, and nothing is compiled while a merge is unresolved or while the
+  page is hidden.
+- **SyncTeX** — after a local build, double-click a word on the page to open its
+  source line, or ⇧⌘J to scroll the page to the caret's line. Remote builds do
+  not expose their `.synctex.gz`, so the jump controls appear only for pages
+  compiled on this Mac.
+- **File management** — new files and folders, rename, move and delete, from the
+  file tree's context menus. Changes go to Overleaf first and are mirrored locally
+  only after it accepts them, so a failed operation leaves both sides untouched.
+- **Drop images** — dropping PNG/PDF/JPEG files onto the source copies them into
+  the document's folder, uploads them and inserts a ready `\includegraphics` line
+  at the drop point.
+- **Version history and autosave** — every successful upload keeps a local
+  snapshot (History, from the clock beside the document name); autosave sends
+  changes after a few idle seconds by default, and can be turned off in
+  **Project → Autosave**. Snapshots are local, so they are not a substitute for
+  Overleaf's own history.
+- **Collaborator presence** — while a project is open the realtime socket stays
+  connected, showing the initials of other editors and a **Reload and Merge**
+  notice when files change elsewhere. This is presence and refresh-on-change, not
+  live operational transformation.
 - **Saving** — ⌘S writes the file to the working copy and uploads it, and ⌘B
   saves every changed file before compiling. Typing is mirrored to disk shortly
   after you stop, so a crash cannot lose it; **⌘⇧C copies the open file** to the
@@ -91,8 +139,14 @@ later launches. Sign out from **Project → Sign Out** to remove it.
 | Shortcut | Action |
 |---|---|
 | ⌘B | Save and compile |
+| Tab | Expand a LaTeX snippet at the caret |
+| Return | Close a `\begin{...}` line with its `\end{...}` |
+| ⇧⌘E | Export the compiled PDF |
 | ⌘S | Save the current file to Overleaf |
 | ⌥⌘E | Switch between Code and Visual editing |
+| ⌥⌘W | Close the active file tab |
+| ⇧⌘F | Find and replace across the project |
+| ⇧⌘J | Reveal the caret's line on a locally built page |
 | ⌘⇧U | Upload files from disk |
 | ⌘⇧S | Sync queued changes now |
 | ⌥⌘B | Compile locally (requires TeX on this Mac) |
@@ -131,6 +185,28 @@ Local compilation needs a TeX installation; nothing is bundled. `latexmk` is
 preferred, with `pdflatex` plus `bibtex` as a fallback, and the search covers
 MacTeX/BasicTeX (`/Library/TeX/texbin`), Homebrew, MacPorts, TinyTeX under
 `~/Library/TinyTeX` and TeX Live under `/usr/local/texlive`.
+
+## Writing assistance
+
+Two editor behaviours are pure functions over the buffer, so they can be tested
+without an `NSTextView`:
+
+- `LaTeXAssistance.environmentClose` fires on Return at the end of a line that is
+  only `\begin{env}` (optional arguments allowed), and after a typed `}` finishes
+  such a line. It inserts a blank body line and an indented `\end{env}`, then puts
+the caret in the body. It does nothing when the following block already closes
+that environment, so pressing Return twice cannot stack two ends.
+- `LaTeXAssistance.snippet` expands a trigger on Tab. Triggers are whole words, so
+  prose ending in "fig" is left alone, and a trigger inside a comment is ignored.
+
+The checks in `LaTeXLint` are local and run about a second after typing stops.
+They cover balanced braces, environments, duplicate labels and unknown `\ref` or
+`\cite` keys (reference checks need the project index, so they are skipped before
+the first index is built). ChkTeX is optional: when found on `PATH` or beside the
+TeX toolchain, it checks a temporary copy of the unsaved buffer. Its output is
+parsed for file, line, severity and message. Diagnostics from the compiler and
+from these checks are kept separately, so a build never wipes warnings you have
+not addressed yet.
 
 ## Visual editing
 
@@ -200,7 +276,9 @@ Four details that matter:
 
 Saves depend on one detail of Overleaf's realtime service, and it is not what its
 modern name suggests. Overleaf pins a **fork of socket.io 0.9**, which predates
-Engine.IO entirely:
+Engine.IO entirely. Saves use a short-lived join for the folder id; a second,
+persistent join powers presence and remote-change notices. Both speak this wire
+format:
 
 - the handshake is `GET /socket.io/1/?t=…&projectId=…`, answering
   `sid:heartbeat:closeTimeout:transports`;
@@ -229,21 +307,38 @@ Three things this app has to do that are easy to get wrong:
 - **Undocumented API.** These routes are implementation details of the Overleaf
   web app and can change without notice; a change on their side can break this
   app. It is designed to fail with a clear message rather than corrupt a project.
-- **No live collaboration.** The socket is used only to read the project's folder
-  id, then closed: this app does not run Overleaf's operational-transform
-  protocol, so you will not see collaborators' cursors or edits appear live.
-  Saving merges whatever they have already saved; see
-  [Offline editing and merging](#offline-editing-and-merging).
-- **No file deletion or renaming** yet — the upload route can add and replace
-  files, but there is no equivalent for removing them. Delete in Overleaf, then
-  reload.
+- **Presence, not live collaboration.** A realtime stream stays open for
+  collaborator presence and tree-change notices, but this app does not run
+  Overleaf's operational-transform protocol: you will not see cursors or
+  character-by-character edits. Use **Reload and Merge** when someone else
+  changes the project; saving merges whatever they have already saved. The
+  presence event names are inferred from Overleaf's client tracking and are
+  best-effort — if they change, the toolbar simply shows nobody.
+- **SyncTeX needs a local build.** The map is read from the build directory on
+  this Mac. Overleaf does not expose `.synctex.gz` through the routes the app
+  uses, so PDF/source jumps are disabled for remote builds.
+- **File operations are id-based.** Rename, move and delete resolve the entity
+  ids from the realtime join. They update Overleaf first and the working copy
+  only after it accepts; browser-side changes made between the join and the
+  operation can make an id stale, in which case the app reports it instead of
+  guessing. **New File** still uses the upload route, so Overleaf stores the
+  result as an uploaded file rather than an editor document.
+- **History is local.** Up to 25 snapshots per file are kept in
+  `~/Library/Application Support/Mangrove/History`. They are not Overleaf's
+  version history and are not uploaded. Renaming a file starts a new history,
+  because the snapshots are keyed by path.
+- **Autosave is not unconditional.** It only runs while the project is online,
+  no merge is pending and nothing is compiling; otherwise changes stay in the
+  crash-safe draft and the offline queue. A merge conflict raised by autosave
+  opens the same conflict sheet as a manual save.
 - **Uploads replace same-named files.** Choosing a file whose name already exists
   in the target folder replaces it, with no rename prompt. Files over Overleaf's
   50 MB limit are refused before anything is sent.
 - **Saving writes whole files.** An edit replaces the document's contents rather
   than applying an operation at a position, so history records a single replace
   for that save instead of fine-grained typing.
-- **No version history, tracked changes, comments or project creation.**
+- **No tracked changes, comments or project creation.** The local History sheet
+  is a safety net, not a replacement for Overleaf's own history.
 - Compiles run on Overleaf's servers and count against your account's limits;
   the download route is rate limited by Overleaf, so avoid loading projects in a
   tight loop.
@@ -282,9 +377,18 @@ Sources/Mangrove/
   FileImport.swift          Where files chosen from disk land in a project
   VisualDocument.swift      Parses .tex into blocks with exact source ranges
   InlineLaTeX.swift         Inline markup ⇄ attributed text, and the rewriter
+  DocumentOutline.swift     Headings, line numbers and per-section word counts
+  CompletionIndex.swift     Bib keys, labels and cite/ref context at the caret
+  ProjectSearch.swift       Project-wide find and replace
+  ProjectHistory.swift      Local upload snapshots and a line diff
+  ProjectEntities.swift     Docs/files/folders and ids from the realtime join
+  SyncTeX.swift             Source ⇄ PDF mapping through the synctex CLI
   BuildDiagnostics.swift    TeX log and validation problems → ordered diagnostics
   LineMerge.swift           diff3 merge, sync decisions, offline classification
   LocalLaTeX.swift          Finds and runs a local TeX toolchain
+  IdleCompile.swift         The debounce and gates for automatic compilation
+  LaTeXAssistance.swift     Environment auto-close and Tab snippet expansion
+  LaTeXLint.swift           Built-in syntax checks plus optional ChkTeX
   NetworkMonitor.swift      Path monitoring that triggers queued sync
   AppState.swift            Session lifecycle, saving, merging, offline queue
   Models.swift              Projects, output files, file tree, errors
@@ -292,6 +396,7 @@ Sources/Mangrove/
   Views/SourceEditor.swift  LaTeX editor (NSTextView) and its highlighting
   Views/VisualEditor.swift  The visual page, format bar and inline text views
   Views/BuildPane.swift     PDF / Problems / Log tabs, jump-to-source
+  Views/ProjectTools.swift  Search, history and file-operation sheets
   Views/MergeConflictView.swift  Side-by-side conflict resolution
   Views/                    SwiftUI: sign-in, sidebar, editor, PDFKit pane
 Tests/MangroveTests/ Session/cookie handling, diff3, sync planning, offline builds,
