@@ -20,7 +20,7 @@ final class OverleafClient {
     /// Used for API requests: a desktop Safari user agent plus an honest app token.
     static let userAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-        + "(KHTML, like Gecko) Version/16.0 Safari/605.1.15 Mangrove/1.0"
+        + "(KHTML, like Gecko) Version/16.0 Safari/605.1.15 Mangrove/2.0"
 
     /// Used for the embedded sign-in web view, where Overleaf and the identity
     /// providers it delegates to expect an ordinary browser.
@@ -40,6 +40,10 @@ final class OverleafClient {
     /// `joinProjectResponse`. One lookup per project is enough for the run.
     private var rootFolderIds: [String: String] = [:]
     private var joinsInFlight: [String: Task<String, Error>] = [:]
+    /// Entity trees, for the id-based rename/move/delete routes. Invalidated
+    /// after every mutation so the next operation sees Overleaf's new layout.
+    private var projectTrees: [String: ProjectEntityTree] = [:]
+    private var treeJoinsInFlight: [String: Task<ProjectEntityTree, Error>] = [:]
 
     /// Called whenever Overleaf refreshes our session cookies, so the caller can
     /// persist them (the CSRF secret lives in the session).
@@ -190,11 +194,18 @@ final class OverleafClient {
     /// Cheap "is this session still good?" check. Used after sign-in and at launch.
     func verifySession() async -> Bool {
         do {
-            let _: ProjectsResponse = try await getJSON("/user/projects", as: ProjectsResponse.self)
+            try await checkSession()
             return true
         } catch {
             return false
         }
+    }
+
+    /// The throwing form, so launch can tell an expired session from a network
+    /// failure. The first means sign in again; the second means keep working
+    /// locally.
+    func checkSession() async throws {
+        let _: ProjectsResponse = try await getJSON("/user/projects", as: ProjectsResponse.self)
     }
 
     /// The CSRF token is a plain-text GET endpoint that the web app uses too.
@@ -345,6 +356,101 @@ final class OverleafClient {
            let success = json["success"] as? Bool, success == false {
             let reason = json["error"] as? String ?? ""
             throw MangroveError.http(status: 422, body: reason.isEmpty ? "rejected" : reason)
+        }
+    }
+
+    // MARK: - Project tree and entity operations
+
+    /// The project's docs, files and folders with their Overleaf ids.
+    ///
+    /// The tree only arrives over the realtime channel, and it is cached for the
+    /// session because joining is an expensive handshake. Mutations drop the
+    /// cache; nothing else in the app changes the tree behind our back without a
+    /// reload.
+    func projectTree(projectId: String, forceRefresh: Bool = false) async throws -> ProjectEntityTree {
+        if !forceRefresh, let cached = projectTrees[projectId] { return cached }
+        if let existing = treeJoinsInFlight[projectId] { return try await existing.value }
+
+        let baseURL = self.baseURL
+        let session = self.session
+        let task = Task<ProjectEntityTree, Error> {
+            let channel = RealtimeChannel(
+                baseURL: baseURL,
+                cookieHeader: session.cookieHeader(),
+                userAgent: Self.userAgent,
+                log: { SyncDiagnostics.write($0) }
+            )
+            let join = try await channel.joinProject(projectId)
+            guard let tree = join.tree else {
+                throw MangroveError.message(
+                    "Overleaf did not report the project's file tree, which is needed to change files."
+                )
+            }
+            return tree
+        }
+        treeJoinsInFlight[projectId] = task
+        defer { treeJoinsInFlight[projectId] = nil }
+
+        let tree = try await task.value
+        projectTrees[projectId] = tree
+        return tree
+    }
+
+    func createFolder(projectId: String, name: String, parentFolderId: String) async throws {
+        let payload: [String: Any] = ["name": name, "parent_folder_id": parentFolderId]
+        try await sendEntityCommand(
+            path: "/project/\(projectId)/folder", method: "POST", payload: payload
+        )
+        projectTrees[projectId] = nil
+    }
+
+    func renameEntity(
+        projectId: String, type: ProjectEntity.Kind, id: String, name: String
+    ) async throws {
+        let payload: [String: Any] = ["name": name, "source": "editor"]
+        try await sendEntityCommand(
+            path: "/project/\(projectId)/\(type.rawValue)/\(id)/rename",
+            method: "POST", payload: payload
+        )
+        projectTrees[projectId] = nil
+    }
+
+    func moveEntity(
+        projectId: String, type: ProjectEntity.Kind, id: String, folderId: String
+    ) async throws {
+        let payload: [String: Any] = ["folder_id": folderId, "source": "editor"]
+        try await sendEntityCommand(
+            path: "/project/\(projectId)/\(type.rawValue)/\(id)/move",
+            method: "POST", payload: payload
+        )
+        projectTrees[projectId] = nil
+    }
+
+    func deleteEntity(
+        projectId: String, type: ProjectEntity.Kind, id: String
+    ) async throws {
+        try await sendEntityCommand(
+            path: "/project/\(projectId)/\(type.rawValue)/\(id)",
+            method: "DELETE", payload: nil
+        )
+        projectTrees[projectId] = nil
+    }
+
+    private func sendEntityCommand(
+        path: String, method: String, payload: [String: Any]?
+    ) async throws {
+        var request = try makeRequest(path: path, method: method)
+        if let payload {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        }
+        let (data, _) = try await performAuthorized(request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        if let success = json["success"] as? Bool, success == false {
+            let reason = json["error"] as? String ?? "rejected"
+            throw MangroveError.http(status: 422, body: reason)
         }
     }
 

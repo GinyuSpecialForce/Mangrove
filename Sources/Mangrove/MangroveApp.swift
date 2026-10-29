@@ -32,26 +32,99 @@ struct MangroveApp: App {
                 .keyboardShortcut("b", modifiers: .command)
                 .disabled(state.selectedProjectId == nil)
 
-                Button("Copy File Contents") {
-                    state.copyCurrentFileToPasteboard()
-                }
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(state.openPath == nil)
+                Group {
+                    Button("Close File") { state.closeActiveDocument() }
+                        .keyboardShortcut("w", modifiers: [.command, .option])
+                        .disabled(state.openPath == nil)
 
-                Button("Reload from Overleaf") {
-                    Task { await state.reloadProject() }
+                    Button("Find in Project…") { state.isShowingProjectSearch = true }
+                        .keyboardShortcut("f", modifiers: [.command, .shift])
+                        .disabled(state.selectedProjectId == nil)
+
+                    Button("Version History…") { state.isShowingHistory = true }
+                        .disabled(state.historyForOpenFile.isEmpty)
+
+                    Button("Reveal in PDF") { state.revealInPDF() }
+                        .keyboardShortcut("j", modifiers: [.command, .shift])
+                        .disabled(!state.syncTeXAvailable)
+
+                    Button("Copy File Contents") {
+                        state.copyCurrentFileToPasteboard()
+                    }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(state.openPath == nil)
+
+                    Button("Export PDF…") {
+                        state.exportPDF()
+                    }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(state.pdfData == nil)
                 }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.selectedProjectId == nil)
+
+                // One Group keeps the menu within ViewBuilder's ten-child limit.
+                Group {
+                    Button("Reload from Overleaf") {
+                        Task { await state.reloadProject() }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(state.selectedProjectId == nil)
+
+                    Button("Upload Files…") {
+                        state.chooseFilesToUpload()
+                    }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
+                    .disabled(!state.canUploadFiles)
+
+                    Button("New Folder…") {
+                        state.beginNewFolder(
+                            in: state.openPath.map { ($0 as NSString).deletingLastPathComponent } ?? ""
+                        )
+                    }
+                    .disabled(!state.canUploadFiles)
+                }
 
                 Divider()
 
-                Toggle("Draft Compile", isOn: $state.draftMode)
+                Group {
+                    Button("Sync Pending Changes") { state.syncPendingChanges() }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
+                        .disabled(!state.isOnline || !state.hasPendingWork)
+
+                    Button("Resolve Merge Conflicts…") { state.showNextMerge() }
+                        .disabled(state.pendingMerges.isEmpty)
+
+                    Button("Compile Locally") { state.compileLocally() }
+                        .keyboardShortcut("b", modifiers: [.command, .option])
+                        .disabled(state.selectedProjectId == nil)
+                }
+
+                Divider()
+
+                Group {
+                    Toggle("Draft Compile", isOn: $state.draftMode)
+                    Toggle("Autosave", isOn: Binding(
+                        get: { state.autosaveEnabled },
+                        set: { state.setAutosave($0) }
+                    ))
+                    Toggle("Auto Compile", isOn: Binding(
+                        get: { state.autoCompileEnabled },
+                        set: { state.setAutoCompile($0) }
+                    ))
+                }
 
                 Divider()
 
                 Button("Sign Out") { state.signOut() }
                     .disabled(!state.isSignedIn)
+            }
+
+            CommandMenu("View") {
+                Toggle("Visual Editor", isOn: Binding(
+                    get: { state.editorMode == .visual },
+                    set: { state.editorMode = $0 ? .visual : .code }
+                ))
+                .keyboardShortcut("e", modifiers: [.command, .option])
+                .disabled(!state.canEditVisually)
             }
         }
     }

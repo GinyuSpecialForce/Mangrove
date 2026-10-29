@@ -285,6 +285,47 @@ struct SourcePalette {
 /// re-resolved when the system switches between light and dark.
 final class SourceTextView: NSTextView {
     var onAppearanceChange: (() -> Void)?
+    /// Files dropped on the source, with the caret index to insert them at.
+    var onDropFiles: (([URL], Int) -> Void)?
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedURLs(from: sender).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        !droppedURLs(from: sender).isEmpty || super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = droppedURLs(from: sender)
+        guard !urls.isEmpty else { return super.performDragOperation(sender) }
+        let point = convert(sender.draggingLocation, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        onDropFiles?(urls, index)
+        return true
+    }
+
+    private func droppedURLs(from sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        return (sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self], options: options
+        ) as? [URL]) ?? []
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -304,6 +345,11 @@ final class SourceTextView: NSTextView {
 /// SwiftUI's `TextEditor` cannot style source.
 struct SourceEditor: NSViewRepresentable {
     @Binding var text: String
+    /// Set by a compiler problem or a visual block that needs source editing.
+    var jump: EditorJump? = nil
+    var completion: CompletionIndex = CompletionIndex()
+    var onCaretLineChange: ((Int) -> Void)? = nil
+    var onDropFiles: (([URL], Int) -> Void)? = nil
 
     static let fontSize: CGFloat = 12.5
 
@@ -348,18 +394,29 @@ struct SourceEditor: NSViewRepresentable {
         scrollView.documentView = textView
         textView.delegate = context.coordinator
         context.coordinator.attach(textView)
+        context.coordinator.completion = completion
+        context.coordinator.onCaretLineChange = onCaretLineChange
+        context.coordinator.onDropFiles = onDropFiles
+        textView.onDropFiles = { [weak coordinator = context.coordinator] urls, index in
+            coordinator?.onDropFiles?(urls, index)
+        }
         context.coordinator.setText(text)
+        if let jump { context.coordinator.apply(jump: jump) }
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.attach(textView)
+        context.coordinator.completion = completion
+        context.coordinator.onCaretLineChange = onCaretLineChange
+        context.coordinator.onDropFiles = onDropFiles
         // Only replace the text when it came from somewhere other than this
         // editor — otherwise every keystroke would reset the insertion point.
         if textView.string != text {
             context.coordinator.setText(text)
         }
+        if let jump { context.coordinator.apply(jump: jump) }
     }
 
     // MARK: Coordinator
@@ -369,6 +426,13 @@ struct SourceEditor: NSViewRepresentable {
         private weak var textView: SourceTextView?
         private var highlightScheduled = false
         private var isReplacingText = false
+        private var isApplyingAssistance = false
+        private var pendingInsertion: String?
+        private var lastJump: UUID?
+        private var lastCaretLine = 0
+        var completion = CompletionIndex()
+        var onCaretLineChange: ((Int) -> Void)?
+        var onDropFiles: (([URL], Int) -> Void)?
 
         init(text: Binding<String>) {
             self.text = text
@@ -389,6 +453,7 @@ struct SourceEditor: NSViewRepresentable {
         func setText(_ newText: String) {
             guard let textView else { return }
             isReplacingText = true
+            pendingInsertion = nil
             textView.string = newText
             isReplacingText = false
             textView.undoManager?.removeAllActions()
@@ -398,13 +463,167 @@ struct SourceEditor: NSViewRepresentable {
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
             highlight()
+            reportCaretLine()
+        }
+
+        /// Selects a line requested by a compiler problem and scrolls it into
+        /// view. Repeating the same jump would do nothing, so each request
+        /// carries its own token.
+        func apply(jump: EditorJump) {
+            guard let textView, jump.token != lastJump else { return }
+            lastJump = jump.token
+            let length = (textView.string as NSString).length
+            let location = min(max(jump.range.location, 0), length)
+            let selection = NSRange(
+                location: location,
+                length: min(max(jump.range.length, 0), length - location)
+            )
+            textView.setSelectedRange(selection)
+            textView.scrollRangeToVisible(selection)
+            textView.window?.makeFirstResponder(textView)
+            reportCaretLine()
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            pendingInsertion = replacementString
+            return true
         }
 
         func textDidChange(_ notification: Notification) {
             guard !isReplacingText, let textView else { return }
+            if !isApplyingAssistance, pendingInsertion == "}" {
+                applyEnvironmentCloseIfNeeded(textView)
+            }
+            pendingInsertion = nil
             text.wrappedValue = textView.string
             textView.typingAttributes = baseAttributes(ink: inkColor())
             scheduleHighlight()
+            reportCaretLine()
+            scheduleCompletion(after: textView)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            reportCaretLine()
+        }
+
+        /// Tab expands a known snippet; Return after a complete `\begin{...}`
+        /// line inserts the matching end and leaves the caret in the body. Both
+        /// return false unless they actually changed the text, so normal Tab and
+        /// Return behavior is untouched.
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard !textView.hasMarkedText() else { return false }
+            let caret = textView.selectedRange().location
+
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if let close = LaTeXAssistance.environmentClose(
+                    in: textView.string, caret: caret
+                ) {
+                    apply(
+                        close.insertion,
+                        range: NSRange(location: caret, length: 0),
+                        caretOffset: 1,
+                        to: textView
+                    )
+                    return true
+                }
+                return false
+            }
+
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                let source = textView.string as NSString
+                let before = source.substring(to: min(caret, source.length))
+                if let expansion = LaTeXAssistance.snippet(beforeCaret: before) {
+                    apply(
+                        expansion.insertion,
+                        range: expansion.range,
+                        caretOffset: expansion.caretOffset,
+                        to: textView
+                    )
+                    return true
+                }
+            }
+            return false
+        }
+
+        private func applyEnvironmentCloseIfNeeded(_ textView: NSTextView) {
+            guard !textView.hasMarkedText() else { return }
+            let caret = textView.selectedRange().location
+            guard let close = LaTeXAssistance.environmentClose(
+                in: textView.string, caret: caret
+            ) else { return }
+            apply(
+                close.insertion,
+                range: NSRange(location: caret, length: 0),
+                caretOffset: 0,
+                to: textView
+            )
+        }
+
+        private func apply(
+            _ insertion: String,
+            range: NSRange,
+            caretOffset: Int,
+            to textView: NSTextView
+        ) {
+            guard textView.shouldChangeText(in: range, replacementString: insertion) else {
+                return
+            }
+            isApplyingAssistance = true
+            textView.insertText(insertion, replacementRange: range)
+            textView.setSelectedRange(NSRange(
+                location: range.location + caretOffset, length: 0
+            ))
+            isApplyingAssistance = false
+            pendingInsertion = nil
+        }
+
+        // MARK: Completion
+
+        /// Offers keys after `{` in a cite/ref command. AppKit drives the popup;
+        /// the delegate only supplies the candidates for the command at hand.
+        func textView(
+            _ textView: NSTextView,
+            completions words: [String],
+            forPartialWordRange charRange: NSRange,
+            indexOfSelectedItem index: UnsafeMutablePointer<Int>?
+        ) -> [String] {
+            let source = textView.string as NSString
+            let caret = min(charRange.location + charRange.length, source.length)
+            guard let request = CompletionIndex.request(before: source.substring(to: caret)) else {
+                return words
+            }
+            let keys = completion.suggestions(for: request.kind)
+            let filtered = request.partial.isEmpty
+                ? keys
+                : keys.filter { $0.localizedCaseInsensitiveContains(request.partial) }
+            index?.pointee = 0
+            return filtered
+        }
+
+        private func scheduleCompletion(after textView: NSTextView) {
+            let caret = textView.selectedRange().location
+            let before = (textView.string as NSString).substring(to: min(caret, (textView.string as NSString).length))
+            guard before.hasSuffix("{"),
+                  let request = CompletionIndex.request(before: before),
+                  !completion.suggestions(for: request.kind).isEmpty else { return }
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, textView.window?.firstResponder === textView else { return }
+                textView.complete(nil)
+            }
+        }
+
+        private func reportCaretLine() {
+            guard let textView else { return }
+            let location = min(textView.selectedRange().location, (textView.string as NSString).length)
+            let prefix = (textView.string as NSString).substring(to: location)
+            let line = prefix.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+            guard line != lastCaretLine else { return }
+            lastCaretLine = line
+            onCaretLineChange?(line)
         }
 
         /// Attribute passes are deferred a runloop turn so they never land in the

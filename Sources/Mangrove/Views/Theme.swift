@@ -49,33 +49,143 @@ enum Theme {
 
 // MARK: - Marks and rules
 
-/// The leaf glyph, drawn so it matches the app icon exactly and stays crisp at
-/// any size — including outside an app bundle, where the icns is unavailable.
-struct LeafMark: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let cx = rect.midX
-        let cy = rect.midY
-        let halfHeight = rect.height / 2
-        let halfWidth = rect.width / 2
+/// The mangrove glyph, drawn from the same geometry as `Scripts/make-icon.swift`:
+/// a clustered crown on arching prop roots, standing in shallow water. Keeping
+/// it in SwiftUI means the sidebar mark stays crisp outside an app bundle, where
+/// the icns is unavailable.
+struct MangroveMark: View {
+    var body: some View {
+        Canvas { context, size in
+            let S = min(size.width, size.height)
 
-        path.move(to: CGPoint(x: cx, y: cy - halfHeight))
-        path.addCurve(
-            to: CGPoint(x: cx, y: cy + halfHeight),
-            control1: CGPoint(x: cx - halfWidth * 1.42, y: cy - halfHeight * 0.62),
-            control2: CGPoint(x: cx - halfWidth * 1.42, y: cy + halfHeight * 0.62)
-        )
-        path.addCurve(
-            to: CGPoint(x: cx, y: cy - halfHeight),
-            control1: CGPoint(x: cx + halfWidth * 1.42, y: cy + halfHeight * 0.62),
-            control2: CGPoint(x: cx + halfWidth * 1.42, y: cy - halfHeight * 0.62)
-        )
-        path.closeSubpath()
-        return path
+            // The icon is authored bottom-up, the way CoreGraphics draws; this
+            // flips its coordinates into SwiftUI's top-down space.
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: S * x, y: S * (1 - y))
+            }
+            func rect(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat) -> CGRect {
+                CGRect(x: S * x, y: S * (1 - y - height), width: S * width, height: S * height)
+            }
+
+            var canopy = Path()
+            canopy.addEllipse(in: rect(0.235, 0.545, 0.530, 0.155))
+            canopy.addEllipse(in: rect(0.245, 0.585, 0.175, 0.165))
+            canopy.addEllipse(in: rect(0.360, 0.625, 0.195, 0.190))
+            canopy.addEllipse(in: rect(0.480, 0.635, 0.190, 0.190))
+            canopy.addEllipse(in: rect(0.595, 0.610, 0.175, 0.175))
+            canopy.addEllipse(in: rect(0.660, 0.575, 0.120, 0.140))
+            canopy.addEllipse(in: rect(0.225, 0.555, 0.190, 0.120))
+
+            context.drawLayer { layer in
+                layer.addFilter(.shadow(
+                    color: Color.black.opacity(0.30),
+                    radius: S * 0.014,
+                    x: 0,
+                    y: S * 0.007
+                ))
+                layer.fill(
+                    canopy,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            .white,
+                            Color(red: 222 / 255, green: 242 / 255, blue: 230 / 255),
+                        ]),
+                        startPoint: CGPoint(x: 0, y: S * 0.21),
+                        endPoint: CGPoint(x: 0, y: S * 0.46)
+                    )
+                )
+            }
+
+            var trunk = Path()
+            trunk.move(to: point(0.470, 0.570))
+            trunk.addLine(to: point(0.530, 0.570))
+            trunk.addCurve(
+                to: point(0.545, 0.455),
+                control1: point(0.530, 0.525),
+                control2: point(0.538, 0.485)
+            )
+            trunk.addLine(to: point(0.455, 0.455))
+            trunk.addCurve(
+                to: point(0.470, 0.570),
+                control1: point(0.462, 0.485),
+                control2: point(0.470, 0.525)
+            )
+            trunk.closeSubpath()
+            context.fill(trunk, with: .color(.white))
+
+            var waterline = Path()
+            waterline.move(to: point(0.235, 0.272))
+            waterline.addLine(to: point(0.765, 0.272))
+            context.stroke(
+                waterline,
+                with: .color(Color(red: 198 / 255, green: 236 / 255, blue: 219 / 255).opacity(0.26)),
+                style: StrokeStyle(lineWidth: max(0.5, S * 0.006), lineCap: .round)
+            )
+
+            var roots = Path()
+            roots.move(to: point(0.466, 0.470))
+            roots.addCurve(
+                to: point(0.305, 0.272),
+                control1: point(0.430, 0.465),
+                control2: point(0.310, 0.390)
+            )
+            roots.move(to: point(0.534, 0.470))
+            roots.addCurve(
+                to: point(0.695, 0.272),
+                control1: point(0.570, 0.465),
+                control2: point(0.690, 0.390)
+            )
+            roots.move(to: point(0.484, 0.458))
+            roots.addCurve(
+                to: point(0.412, 0.262),
+                control1: point(0.462, 0.430),
+                control2: point(0.412, 0.335)
+            )
+            roots.move(to: point(0.516, 0.458))
+            roots.addCurve(
+                to: point(0.588, 0.262),
+                control1: point(0.538, 0.430),
+                control2: point(0.588, 0.335)
+            )
+            context.stroke(
+                roots,
+                with: .color(.white),
+                style: StrokeStyle(lineWidth: max(0.5, S * 0.038), lineCap: .round)
+            )
+
+            var centreRoot = Path()
+            centreRoot.move(to: point(0.500, 0.455))
+            centreRoot.addCurve(
+                to: point(0.500, 0.252),
+                control1: point(0.508, 0.400),
+                control2: point(0.492, 0.320)
+            )
+            context.stroke(
+                centreRoot,
+                with: .color(.white),
+                style: StrokeStyle(lineWidth: max(0.5, S * 0.034), lineCap: .round)
+            )
+
+            for ripple in [
+                (y: CGFloat(0.248), width: CGFloat(0.380), alpha: CGFloat(0.32)),
+                (y: CGFloat(0.216), width: CGFloat(0.270), alpha: CGFloat(0.24)),
+                (y: CGFloat(0.188), width: CGFloat(0.160), alpha: CGFloat(0.18)),
+            ] {
+                var line = Path()
+                line.move(to: point(0.5 - ripple.width / 2, ripple.y))
+                line.addLine(to: point(0.5 + ripple.width / 2, ripple.y))
+                context.stroke(
+                    line,
+                    with: .color(Color(red: 198 / 255, green: 236 / 255, blue: 219 / 255)
+                        .opacity(ripple.alpha)),
+                    style: StrokeStyle(lineWidth: max(0.5, S * 0.007), lineCap: .round)
+                )
+            }
+        }
     }
 }
 
-/// The app mark: the green tile with a white leaf, as in the icon.
+/// The app mark: the tidal-green tile with the white mangrove, as in the icon.
 struct AppMark: View {
     var size: CGFloat = 28
 
@@ -85,9 +195,9 @@ struct AppMark: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.22, green: 0.73, blue: 0.41),
-                            Color(red: 0.08, green: 0.55, blue: 0.26),
-                            Color(red: 0.04, green: 0.35, blue: 0.17)
+                            Color(red: 0.173, green: 0.612, blue: 0.455),
+                            Color(red: 0.063, green: 0.408, blue: 0.294),
+                            Color(red: 0.027, green: 0.212, blue: 0.176)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
@@ -98,9 +208,7 @@ struct AppMark: View {
                         .strokeBorder(Color.white.opacity(0.18), lineWidth: max(0.5, size * 0.014))
                 )
 
-            LeafMark()
-                .fill(Color.white)
-                .frame(width: size * 0.44, height: size * 0.58)
+            MangroveMark()
         }
         .frame(width: size, height: size)
         .shadow(color: .black.opacity(size > 40 ? 0.20 : 0.14), radius: size * 0.07, y: size * 0.02)

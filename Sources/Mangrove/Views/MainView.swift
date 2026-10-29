@@ -17,7 +17,41 @@ struct MainView: View {
             Rule()
             StatusBar()
         }
+        .overlay(alignment: .top) {
+            if state.remoteChangeDetected {
+                RemoteChangeBanner()
+                    .padding(.top, 8)
+            }
+        }
+        .onChange(of: state.rightPane) { _ in
+            state.pageVisibilityChanged()
+        }
         .toolbar { toolbarContent }
+        .sheet(isPresented: $state.isShowingMergeSheet) {
+            if let merge = state.currentMerge {
+                MergeConflictSheet(merge: merge)
+                    .environmentObject(state)
+                    .id(merge.id)
+            }
+        }
+        .sheet(isPresented: $state.isShowingProjectSearch) {
+            ProjectSearchSheet().environmentObject(state)
+        }
+        .sheet(isPresented: $state.isShowingHistory) {
+            HistorySheet().environmentObject(state)
+        }
+        .sheet(isPresented: $state.isShowingNewFolderSheet) {
+            NewFolderSheet().environmentObject(state)
+        }
+        .sheet(item: $state.renameRequest) { request in
+            RenameSheet(request: request).environmentObject(state)
+        }
+        .sheet(item: $state.moveRequest) { request in
+            MoveSheet(request: request).environmentObject(state)
+        }
+        .sheet(item: $state.deleteRequest) { request in
+            DeleteFileSheet(request: request).environmentObject(state)
+        }
     }
 
     @ViewBuilder
@@ -44,6 +78,16 @@ struct MainView: View {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            if state.remoteChangeDetected {
+                Button {
+                    Task { await state.loadRemoteChanges() }
+                } label: {
+                    Label("Reload", systemImage: "arrow.clockwise.circle")
+                }
+                .help("Someone changed this project on Overleaf — reload to merge their changes")
+            }
+
+            CollaboratorBadge()
             SaveControl()
             CompileControl()
 
@@ -61,6 +105,67 @@ struct MainView: View {
 }
 
 // MARK: - Toolbar controls
+
+/// Initials of the people currently connected through the realtime channel. A
+/// menu rather than a stack so long names do not crowd the toolbar.
+private struct CollaboratorBadge: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        if !state.collaborators.isEmpty {
+            let names = state.collaborators.map(\.name).joined(separator: ", ")
+            HStack(spacing: -3) {
+                ForEach(state.collaborators.prefix(3)) { person in
+                    Text(person.initials)
+                        .font(Theme.Typeface.ui(8.5, .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Theme.leafMuted))
+                        .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                }
+                if state.collaborators.count > 3 {
+                    Text("+\(state.collaborators.count - 3)")
+                        .font(Theme.Typeface.mono(8.5, .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 7)
+                }
+            }
+            .help("Also editing now: \(names)")
+        }
+    }
+}
+
+/// A persistent, quiet reminder that the working copy is behind Overleaf.
+private struct RemoteChangeBanner: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.warning)
+            Text("Someone changed this project on Overleaf")
+                .font(Theme.Typeface.ui(10.5, .medium))
+            Button("Reload and Merge") {
+                Task { await state.loadRemoteChanges() }
+            }
+            .buttonStyle(PrimaryButtonStyle(compact: true))
+            Button {
+                state.remoteChangeDetected = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Theme.rule, lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+    }
+}
 
 private struct SaveControl: View {
     @EnvironmentObject private var state: AppState
@@ -104,7 +209,7 @@ private struct CompileControl: View {
         // macOS toolbar, so the primary action uses the explicit style.
         .buttonStyle(PrimaryButtonStyle(compact: true))
         .disabled(state.selectedProjectId == nil || state.isCompiling)
-        .help("Save and compile on Overleaf (⌘B)")
+        .help("Save and compile on Overleaf (⌘B). Auto-compile is \(state.autoCompileEnabled ? "on" : "off").")
     }
 }
 
@@ -113,6 +218,14 @@ private struct CompileControl: View {
 /// The project list and the selected project's files in one tree: a project
 /// unfolds to reveal its files, so the window gives its width to the source and
 /// the compiled page instead of a separate file column.
+private enum SidebarMode: String, CaseIterable, Identifiable {
+    case files
+    case outline
+
+    var id: String { rawValue }
+    var title: String { self == .files ? "Files" : "Outline" }
+}
+
 struct ProjectSidebar: View {
     @EnvironmentObject private var state: AppState
     @State private var query = ""
@@ -120,6 +233,8 @@ struct ProjectSidebar: View {
     @State private var expandedFolders: Set<String> = []
     @State private var isAddingFile = false
     @State private var newFileName = "section.tex"
+    @State private var newFileFolder: String?
+    @State private var mode: SidebarMode = .files
 
     private var filtered: [OverleafProject] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
@@ -130,10 +245,29 @@ struct ProjectSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            SearchField(text: $query)
-            projectList
+            if state.canEditVisually {
+                Picker("Sidebar", selection: $mode) {
+                    ForEach(SidebarMode.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .padding(.horizontal, Theme.Metric.gutter)
+                .padding(.bottom, 8)
+            }
+            if mode == .outline, state.canEditVisually {
+                outlineList
+            } else {
+                SearchField(text: $query)
+                projectList
+            }
             Rule()
             accountFooter
+        }
+        .onChange(of: state.canEditVisually) { available in
+            if !available { mode = .files }
         }
         .background(.thinMaterial)
         .onAppear {
@@ -164,9 +298,18 @@ struct ProjectSidebar: View {
             // Reveal the file that was opened, wherever it lives.
             expandedFolders.formUnion(Self.folders(containing: path))
         }
+        .onChange(of: state.lastImportedPath) { path in
+            guard let path else { return }
+            // An upload into a collapsed project or folder should still show
+            // where the file landed.
+            if let projectId = state.selectedProjectId, expandedProjectId != projectId {
+                withAnimation(.easeOut(duration: 0.14)) { expandedProjectId = projectId }
+            }
+            expandedFolders.formUnion(Self.folders(containing: path))
+        }
         .sheet(isPresented: $isAddingFile) {
             NewFileSheet(name: $newFileName, isPresented: $isAddingFile) { name in
-                state.createFile(named: name)
+                state.createFile(named: name, in: newFileFolder)
             }
         }
     }
@@ -177,6 +320,16 @@ struct ProjectSidebar: View {
             Text("Mangrove")
                 .font(Theme.Typeface.display(15))
             Spacer()
+            Button {
+                state.isShowingProjectSearch = true
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .disabled(state.selectedProjectId == nil)
+            .help("Find in project (⇧⌘F)")
             Button {
                 Task { await state.refreshProjects() }
             } label: {
@@ -191,6 +344,60 @@ struct ProjectSidebar: View {
         .padding(.horizontal, Theme.Metric.gutter)
         .padding(.top, 13)
         .padding(.bottom, 10)
+    }
+
+    // MARK: Outline
+
+    private var outlineItems: [OutlineItem] {
+        DocumentOutline.parse(text: state.editorText)
+    }
+
+    private var outlineList: some View {
+        ScrollView {
+            if outlineItems.isEmpty {
+                VStack(spacing: 5) {
+                    Text("No headings")
+                        .font(Theme.Typeface.ui(11, .medium))
+                    Text("Add \\section, \\subsection or \\chapter commands to outline this document.")
+                        .font(Theme.Typeface.ui(9.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 26)
+                .frame(maxWidth: .infinity)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(outlineItems) { item in
+                        Button {
+                            state.revealOutlineItem(item)
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(item.title)
+                                    .font(Theme.Typeface.ui(
+                                        item.level <= .section ? 11.5 : 10.5,
+                                        item.level <= .section ? .medium : .regular
+                                    ))
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                Spacer(minLength: 2)
+                                Text("\(item.wordCount)")
+                                    .font(Theme.Typeface.mono(8.5))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.leading, CGFloat(max(0, item.level.rawValue - 1)) * 9 + 8)
+                            .padding(.trailing, 7)
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(item.level.title) on line \(item.line) · \(item.wordCount) words")
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+        }
     }
 
     @ViewBuilder
@@ -256,9 +463,21 @@ struct ProjectSidebar: View {
                 Spacer(minLength: 2)
 
                 if isSelected {
-                    Button {
-                        newFileName = "section.tex"
-                        isAddingFile = true
+                    Menu {
+                        Button("New File…") {
+                            newFileFolder = nil
+                            newFileName = "section.tex"
+                            isAddingFile = true
+                        }
+                        Button("New Folder…") {
+                            state.beginNewFolder(
+                                in: state.openPath.map { ($0 as NSString).deletingLastPathComponent } ?? ""
+                            )
+                        }
+                        Button("Upload Files…") {
+                            state.chooseFilesToUpload()
+                        }
+                        .disabled(!state.canUploadFiles)
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 10, weight: .medium))
@@ -266,8 +485,10 @@ struct ProjectSidebar: View {
                             .frame(width: 16, height: 16)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .help("Add a file to this project")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 18)
+                    .help("Create a file or upload one from disk")
                 }
             }
             .padding(.horizontal, 6)
@@ -342,6 +563,29 @@ struct ProjectSidebar: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("New File Here…") {
+                            newFileFolder = node.path
+                            newFileName = "section.tex"
+                            isAddingFile = true
+                        }
+                        Button("New Folder Here…") {
+                            state.beginNewFolder(in: node.path)
+                        }
+                        Button("Upload Files Here…") {
+                            state.chooseFilesToUpload(folder: node.path)
+                        }
+                        Divider()
+                        Button("Rename Folder…") {
+                            state.renameRequest = FileNameRequest(path: node.path, isFolder: true)
+                        }
+                        Button("Move Folder…") {
+                            state.moveRequest = FileMoveRequest(path: node.path, isFolder: true)
+                        }
+                        Button("Delete Folder from Overleaf…") {
+                            state.deleteRequest = FileDeleteRequest(path: node.path, isFolder: true)
+                        }
+                    }
 
                     if isOpen {
                         fileTree(nodes: node.children, depth: depth + 1)
@@ -389,6 +633,17 @@ struct ProjectSidebar: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button("Open") { state.openFile(node.path) }
+            Divider()
+            Button("Rename…") {
+                state.renameRequest = FileNameRequest(path: node.path, isFolder: false)
+            }
+            Button("Move…") {
+                state.moveRequest = FileMoveRequest(path: node.path, isFolder: false)
+            }
+            Button("Delete from Overleaf…") {
+                state.deleteRequest = FileDeleteRequest(path: node.path, isFolder: false)
+            }
+            Divider()
             Button("Remove Locally") { state.deleteFile(node.path) }
         }
     }
@@ -551,18 +806,117 @@ struct EditorPanes: View {
     }
 }
 
+/// Open files, in the order they were opened. A single open file needs no tab
+/// strip; the document header already names it.
+struct DocumentTabs: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 1) {
+                ForEach(state.openDocuments) { document in
+                    DocumentTab(document: document)
+                }
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+        }
+        .frame(height: 29)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+    }
+}
+
+private struct DocumentTab: View {
+    @EnvironmentObject private var state: AppState
+    let document: OpenDocument
+    @State private var isHovering = false
+
+    private var isActive: Bool { state.openPath == document.path }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Button {
+                if !isActive { state.openFile(document.path) }
+            } label: {
+                HStack(spacing: 5) {
+                    if document.isDirty {
+                        Circle().fill(Theme.warning).frame(width: 5, height: 5)
+                    }
+                    Text(document.name)
+                        .font(Theme.Typeface.ui(10.5, isActive ? .medium : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isHovering || isActive {
+                Button {
+                    state.closeDocument(document.path)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12, height: 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close \(document.name)")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isActive ? Color(nsColor: .windowBackgroundColor) : Color.clear)
+        )
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("Close") { state.closeDocument(document.path) }
+            Button("Close Other Tabs") {
+                state.openFile(document.path)
+                state.closeOtherDocuments()
+            }
+        }
+    }
+}
+
 struct EditorPane: View {
     @EnvironmentObject private var state: AppState
 
     var body: some View {
         VStack(spacing: 0) {
+            if state.openDocuments.count > 1 {
+                DocumentTabs()
+                Rule()
+            }
             if let path = state.openPath {
                 documentHead(path: path)
                 Rule()
-                SourceEditor(text: Binding(
-                    get: { state.editorText },
-                    set: { state.editorTextChanged($0) }
-                ))
+                if state.editorMode == .visual && state.canEditVisually {
+                    VisualEditor(
+                        text: Binding(
+                            get: { state.editorText },
+                            set: { state.editorTextChanged($0) }
+                        )
+                    )
+                    .id(path)
+                } else {
+                    SourceEditor(
+                        text: Binding(
+                            get: { state.editorText },
+                            set: { state.editorTextChanged($0) }
+                        ),
+                        jump: state.editorJump,
+                        completion: state.completionIndex,
+                        onCaretLineChange: { state.caretLine = $0 },
+                        onDropFiles: { urls, index in
+                            state.insertDroppedFiles(urls, at: index)
+                        }
+                    )
+                }
                 Rule()
                 documentFooter
             } else {
@@ -581,7 +935,10 @@ struct EditorPane: View {
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
-                    Text(name).font(Theme.Typeface.ui(11, .semibold))
+                    Text(name)
+                        .font(Theme.Typeface.ui(11, .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     if state.isDirty {
                         Circle().fill(Theme.warning).frame(width: 5, height: 5)
                     }
@@ -594,20 +951,53 @@ struct EditorPane: View {
                         .truncationMode(.head)
                 }
             }
-            Spacer()
+            Spacer(minLength: 6)
+            Button {
+                state.isShowingHistory = true
+            } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(state.historyForOpenFile.isEmpty ? Color.secondary : Theme.leaf)
+            }
+            .buttonStyle(.plain)
+            .disabled(state.historyForOpenFile.isEmpty)
+            .help(state.historyForOpenFile.isEmpty
+                  ? "Versions appear after this file is saved to Overleaf"
+                  : "Browse earlier versions of this file")
+            if state.canEditVisually {
+                Picker("Editor mode", selection: $state.editorMode) {
+                    Text("Code").tag(EditorMode.code)
+                    Text("Visual").tag(EditorMode.visual)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 112)
+                .controlSize(.small)
+                .help("Edit the LaTeX source, or a formatted view of it")
+            }
         }
         .padding(.horizontal, Theme.Metric.gutter)
         .padding(.vertical, 8)
+    }
+
+    private var passiveStatus: String {
+        [
+            state.autosaveEnabled ? "Autosave" : nil,
+            state.autoCompileEnabled ? "Auto-compile" : nil,
+        ].compactMap { $0 }.joined(separator: " · ")
     }
 
     private var documentFooter: some View {
         HStack(spacing: 12) {
             Text("\(state.wordCount) words")
             Text("\(state.lineCount) lines")
+            Text("Ln \(state.caretLine)")
             Spacer()
             if state.isDirty {
-                Text("⌘S to save")
+                Text(state.autosaveEnabled ? "Autosaving…" : "⌘S to save")
                     .foregroundStyle(Theme.warning)
+            } else if !passiveStatus.isEmpty {
+                Text(passiveStatus)
             }
         }
         .font(Theme.Typeface.ui(9))
@@ -678,10 +1068,47 @@ struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            if !state.unsavedFiles.isEmpty {
+            connectionState
+
+            if state.pendingSyncCount > 0 {
+                Text("\(state.pendingSyncCount) waiting to sync")
+                    .font(Theme.Typeface.ui(9.5, .medium))
+                    .foregroundStyle(Theme.warning)
+                    .help("These edits are safe on disk and will be sent to Overleaf automatically")
+                if state.isOnline {
+                    Button("Sync Now") { state.syncPendingChanges() }
+                        .buttonStyle(.plain)
+                        .font(Theme.Typeface.ui(9.5, .medium))
+                        .foregroundStyle(Theme.leaf)
+                        .disabled(state.isSyncing || state.isCompiling)
+                }
+            } else if !state.unsavedFiles.isEmpty {
                 Text("\(state.unsavedFiles.count) unsaved")
                     .font(Theme.Typeface.ui(9.5, .medium))
                     .foregroundStyle(Theme.warning)
+            }
+
+            if state.pendingCompile {
+                Text("compile queued")
+                    .font(Theme.Typeface.ui(9.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            if !state.pendingMerges.isEmpty {
+                Button {
+                    state.showNextMerge()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.merge")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(state.pendingMerges.count == 1
+                             ? "Resolve conflict"
+                             : "Resolve \(state.pendingMerges.count) conflicts")
+                    }
+                    .font(Theme.Typeface.ui(9.5, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.warning)
             }
 
             Spacer()
@@ -691,10 +1118,32 @@ struct StatusBar: View {
                     .font(Theme.Typeface.ui(9.5))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                    .truncationMode(.head)
             }
         }
         .padding(.horizontal, Theme.Metric.gutter)
         .padding(.vertical, 5)
         .background(.bar)
+    }
+
+    @ViewBuilder
+    private var connectionState: some View {
+        if !state.isOnline {
+            HStack(spacing: 4) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Offline")
+                    .font(Theme.Typeface.ui(9.5, .medium))
+            }
+            .foregroundStyle(Theme.warning)
+            .help("Edits are saved on this Mac and sync when the connection returns")
+        } else if state.isSyncing {
+            HStack(spacing: 5) {
+                TinySpinner(size: 8)
+                Text("Syncing…")
+                    .font(Theme.Typeface.ui(9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }

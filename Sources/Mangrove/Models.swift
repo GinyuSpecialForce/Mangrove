@@ -3,7 +3,9 @@ import Foundation
 // MARK: - Remote models
 
 /// A project as returned by `GET /user/projects`.
-struct OverleafProject: Identifiable, Hashable, Decodable {
+///
+/// `Codable` so the last list can be cached for offline launches.
+struct OverleafProject: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let accessLevel: String?
@@ -117,6 +119,7 @@ enum TextFileSupport {
 
 enum MangroveError: LocalizedError {
     case notAuthenticated
+    case offline
     case http(status: Int, body: String)
     case decoding(String)
     case compileFailed(String)
@@ -127,6 +130,8 @@ enum MangroveError: LocalizedError {
         switch self {
         case .notAuthenticated:
             return "Your Overleaf session has expired. Please sign in again."
+        case .offline:
+            return "Overleaf is not reachable right now."
         case let .http(status, body):
             if status == 404 {
                 return "Overleaf could not find that (HTTP 404). It may have been deleted, or your access may have changed."

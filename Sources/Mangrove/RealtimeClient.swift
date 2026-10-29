@@ -113,6 +113,15 @@ struct SocketHandshake: Equatable {
 struct ProjectJoin: Equatable {
     let rootFolderId: String?
     let rootDocId: String?
+    /// The full entity tree, with the ids Overleaf's rename/move/delete routes
+    /// need. Present on a normal `joinProjectResponse`.
+    let tree: ProjectEntityTree?
+
+    init(rootFolderId: String?, rootDocId: String?, tree: ProjectEntityTree? = nil) {
+        self.rootFolderId = rootFolderId
+        self.rootDocId = rootDocId
+        self.tree = tree
+    }
 }
 
 enum ProjectTreeIds {
@@ -469,6 +478,12 @@ final class HTTP1WebSocket {
         }
     }
 
+    /// Sends a text frame. Used for Socket.IO's heartbeat reply on a stream that
+    /// stays open; saves never need to write to the socket.
+    func sendText(_ text: String) {
+        sendFrame(opcode: 1, payload: Array(text.utf8))
+    }
+
     private func sendFrame(opcode: UInt8, payload: [UInt8]) {
         guard let connection, !closed else { return }
         var frame = Data([0x80 | opcode])
@@ -644,7 +659,8 @@ final class RealtimeChannel {
                     let payload = event.args.compactMap { $0 as? [String: Any] }.first ?? [:]
                     return .success(ProjectJoin(
                         rootFolderId: ProjectTreeIds.rootFolderId(fromJoinPayload: payload),
-                        rootDocId: ProjectTreeIds.rootDocId(fromJoinPayload: payload)
+                        rootDocId: ProjectTreeIds.rootDocId(fromJoinPayload: payload),
+                        tree: ProjectEntityTreeParser.tree(fromJoinPayload: payload)
                     ))
                 case "connectionRejected":
                     let reason = (event.args.first as? [String: Any])?["message"] as? String ?? ""
@@ -660,6 +676,112 @@ final class RealtimeChannel {
             }
         }
         return nil
+    }
+
+    // MARK: - Persistent presence stream
+
+    /// Joins the project and keeps the socket open, so presence and remote file
+    /// events arrive without another handshake.
+    ///
+    /// Saving still uses the short-lived join above: a save should not depend on
+    /// a socket that may have been idling for an hour.
+    func openStream(_ projectId: String) async throws -> RealtimeStream {
+        let attempts = 3
+        var lastError: Error = WebSocketFailure.closed
+        for attempt in 1...attempts {
+            do {
+                return try await attemptStream(projectId)
+            } catch {
+                lastError = error
+                guard Self.isRetryableUpgrade(error), attempt < attempts else { break }
+                try? await Task.sleep(nanoseconds: 500_000_000 * UInt64(attempt))
+            }
+        }
+        throw Self.describeTransport(lastError)
+    }
+
+    private func attemptStream(_ projectId: String) async throws -> RealtimeStream {
+        let (handshake, affinityCookies) = try await handshake(projectId: projectId)
+        guard handshake.transports.contains("websocket") else {
+            throw MangroveError.message("Overleaf's realtime service did not offer a WebSocket transport.")
+        }
+        var headers: [String: String] = [:]
+        let cookies = ([cookieHeader] + affinityCookies).filter { !$0.isEmpty }.joined(separator: "; ")
+        if !cookies.isEmpty { headers["Cookie"] = cookies }
+        let secure = (baseURL.scheme ?? "https").lowercased() != "http"
+        let socket = HTTP1WebSocket(
+            host: baseURL.host ?? "",
+            port: UInt16(baseURL.port ?? (secure ? 443 : 80)),
+            secure: secure,
+            path: "/socket.io/1/websocket/\(handshake.sid)",
+            extraHeaders: headers,
+            userAgent: userAgent,
+            timeout: timeout
+        )
+        return try await connectStream(
+            socket: socket,
+            projectId: projectId,
+            deadline: max(timeout, handshake.closeTimeout)
+        )
+    }
+
+    private func connectStream(
+        socket: HTTP1WebSocket, projectId: String, deadline: TimeInterval
+    ) async throws -> RealtimeStream {
+        let relay = RealtimeEventRelay()
+        let join: ProjectJoin
+        do {
+            join = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProjectJoin, Error>) in
+            let waiter = OnceResult<ProjectJoin>(continuation)
+            socket.onText = { [weak self] text in
+                guard let self else { return }
+                for raw in SocketIO09.splitPayload(text) {
+                    guard let packet = SocketIO09.decode(raw) else { continue }
+                    if let event = SocketIO09.event(in: packet) {
+                        self.log("presence event \(event.name)")
+                        switch event.name {
+                        case "joinProjectResponse":
+                            let payload = event.args.compactMap { $0 as? [String: Any] }.first ?? [:]
+                            waiter.finish(.success(ProjectJoin(
+                                rootFolderId: ProjectTreeIds.rootFolderId(fromJoinPayload: payload),
+                                rootDocId: ProjectTreeIds.rootDocId(fromJoinPayload: payload),
+                                tree: ProjectEntityTreeParser.tree(fromJoinPayload: payload)
+                            )))
+                        case "connectionRejected":
+                            let reason = (event.args.first as? [String: Any])?["message"] as? String ?? ""
+                            waiter.finish(.failure(Self.describeRejection(reason)))
+                        default:
+                            relay.emit(name: event.name, args: event.args)
+                        }
+                    } else if packet.type == "2" {
+                        // Socket.IO 0.9 heartbeat: echo it or the server closes
+                        // an otherwise idle presence stream.
+                        socket.sendText("2::")
+                    } else if packet.type == "error" {
+                        waiter.finish(.failure(MangroveError.message("Overleaf's realtime service refused the connection.")))
+                    }
+                }
+            }
+            socket.onClose = { error in
+                waiter.finish(.failure(error ?? WebSocketFailure.closed))
+                relay.close(error)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + deadline) {
+                waiter.finish(.failure(MangroveError.message(
+                    "Overleaf's realtime service did not answer in time."
+                )))
+            }
+            Task {
+                do { try await socket.open() } catch { waiter.finish(.failure(error)) }
+            }
+            }
+        } catch {
+            // A join that never completed leaves the socket half-open; close it
+            // before the failure reaches the caller.
+            socket.close()
+            throw error
+        }
+        return RealtimeStream(socket: socket, join: join, relay: relay)
     }
 
     // MARK: Handshake
@@ -789,21 +911,145 @@ final class RealtimeChannel {
         }
     }
 
+    /// Transport failures are reported as `.offline`, which tells the caller to
+    /// keep the work locally and retry rather than showing an error.
     static func describeTransport(_ error: Error) -> Error {
         if let failure = error as? WebSocketFailure {
-            return MangroveError.message("\(failure.errorDescription ?? "Could not reach Overleaf.") Nothing was saved.")
+            switch failure {
+            case .connectionFailed, .closed:
+                return MangroveError.offline
+            case .unexpectedReply, .handshakeStatus:
+                return MangroveError.message(failure.errorDescription ?? "Could not reach Overleaf.")
+            }
         }
         if let urlError = error as? URLError {
             switch urlError.code {
-            case .timedOut:
-                return MangroveError.message("The realtime connection to Overleaf timed out, so nothing was saved.")
-            case .notConnectedToInternet, .networkConnectionLost:
-                return MangroveError.message("Lost the connection to Overleaf, so nothing was saved.")
+            case .timedOut, .notConnectedToInternet, .networkConnectionLost,
+                 .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+                 .dataNotAllowed, .internationalRoamingOff, .secureConnectionFailed:
+                return MangroveError.offline
             default:
                 return MangroveError.message("The realtime connection to Overleaf failed: \(urlError.localizedDescription)")
             }
         }
         return error
+    }
+}
+
+/// A joined socket that stays open for presence and remote-change events.
+final class RealtimeStream {
+    let join: ProjectJoin
+    private let socket: HTTP1WebSocket
+    private let relay: RealtimeEventRelay
+    private var closed = false
+
+    init(socket: HTTP1WebSocket, join: ProjectJoin, relay: RealtimeEventRelay) {
+        self.socket = socket
+        self.join = join
+        self.relay = relay
+    }
+
+    var onEvent: ((String, [Any]) -> Void)? {
+        didSet { relay.handler = onEvent }
+    }
+
+    var onClose: ((Error?) -> Void)? {
+        didSet { relay.closeHandler = onClose }
+    }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        socket.close()
+        relay.close(nil)
+    }
+}
+
+/// Hands events to a handler that may be installed after the socket has already
+/// delivered a few. Packets between `joinProjectResponse` and the stream's first
+/// handler are buffered rather than dropped.
+final class RealtimeEventRelay {
+    private let lock = NSLock()
+    private var pending: [(String, [Any])] = []
+    private var closed = false
+    var handler: ((String, [Any]) -> Void)? {
+        didSet {
+            lock.lock()
+            let buffered = pending
+            pending.removeAll()
+            lock.unlock()
+            guard let handler else { return }
+            for event in buffered { handler(event.0, event.1) }
+        }
+    }
+    var closeHandler: ((Error?) -> Void)?
+
+    func emit(name: String, args: [Any]) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        if let handler {
+            lock.unlock()
+            handler(name, args)
+        } else {
+            if pending.count < 64 { pending.append((name, args)) }
+            lock.unlock()
+        }
+    }
+
+    func close(_ error: Error?) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closed = true
+        let handler = closeHandler
+        lock.unlock()
+        handler?(error)
+    }
+}
+
+/// Decoding for the two realtime event families the app cares about. Kept pure
+/// so the wire shapes can be tested without a live project.
+enum RealtimePresence {
+
+    struct Update: Equatable {
+        let id: String
+        let name: String
+        let online: Bool
+    }
+
+    /// Tree changes that should make a reader reload before saving.
+    static let remoteChangeEvents: Set<String> = [
+        "reciveNewDoc", "reciveNewFile", "reciveNewFolder",
+        "removeEntity", "reciveEntityRename", "reciveEntityMove",
+    ]
+
+    static func update(name: String, payload: [String: Any]) -> Update? {
+        let isDisconnect = name.contains("Disconnected") || name == "leave"
+        let isConnect = name.contains("clientUpdated") || name == "join"
+        guard isConnect || isDisconnect else { return nil }
+
+        let user = payload["user"] as? [String: Any]
+        let id = (payload["user_id"] as? String)
+            ?? (user?["_id"] as? String)
+            ?? (payload["id"] as? String)
+            ?? (payload["client_id"] as? String)
+        guard let id, !id.isEmpty else { return nil }
+
+        let first = (payload["first_name"] as? String) ?? (user?["first_name"] as? String)
+        let last = (payload["last_name"] as? String) ?? (user?["last_name"] as? String)
+        let full = [first, last].compactMap { $0 }.joined(separator: " ")
+        let email = (payload["email"] as? String) ?? (user?["email"] as? String)
+        let fallback = (payload["name"] as? String) ?? email ?? "Collaborator"
+        let display = full.isEmpty ? fallback : full
+        return Update(id: id, name: display, online: !isDisconnect)
+    }
+
+    static func initials(for name: String) -> String {
+        // An email address is one name, not two: ada@example.com is "A", not
+        // "AE". Spaces are the only place a second initial can come from.
+        let words = name.split(whereSeparator: { $0.isWhitespace })
+        let letters = words.prefix(2).compactMap { $0.first.map(String.init) }
+        let result = letters.joined().uppercased()
+        return result.isEmpty ? "?" : result
     }
 }
 
