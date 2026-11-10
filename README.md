@@ -9,7 +9,7 @@ SwiftUI app (Swift Package Manager, no Xcode project required) using `URLSession
 
 > Unofficial and not affiliated with Overleaf.
 
-![The main window, light mode](Screenshots/editor-dark.png)
+![The main window, light mode](Screenshots/main-window.png)
 
 ## Requirements
 
@@ -92,6 +92,10 @@ later launches. Sign out from **Project → Sign Out** to remove it.
   carries its file and line, and clicking one opens the file at that line; the raw
   log is still there, one tab away. **Export PDF** in the build pane (or ⇧⌘E)
   saves the compiled page wherever you like, named after the project.
+- **Export the project** — the archive button in the toolbar (or **Project →
+  Export Project as Zip…**) writes the whole working copy to a zip wherever you
+  choose, including edits not yet saved to Overleaf. Handy for backups, sharing,
+  or opening the project in another LaTeX editor.
 - **Idle compile** — with the page visible, typing pauses for about twenty seconds
   and the document rebuilds on its own. The previous page stays on screen while
   the new one downloads, and the viewer keeps its page, scroll position and zoom
