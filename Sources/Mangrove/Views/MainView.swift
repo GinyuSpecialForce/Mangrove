@@ -75,6 +75,14 @@ struct MainView: View {
             }
             .disabled(state.selectedProjectId == nil || state.isOpeningProject)
             .help("Download this project again from Overleaf")
+
+            Button {
+                state.exportProjectZip()
+            } label: {
+                Label("Export Project as Zip", systemImage: "archivebox")
+            }
+            .disabled(!state.canExportProject)
+            .help("Save a copy of this project as a zip archive")
         }
 
         ToolbarItemGroup(placement: .primaryAction) {

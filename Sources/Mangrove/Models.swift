@@ -124,6 +124,7 @@ enum MangroveError: LocalizedError {
     case decoding(String)
     case compileFailed(String)
     case zipFailed(String)
+    case zipCreateFailed(String)
     case message(String)
 
     var errorDescription: String? {
@@ -144,6 +145,8 @@ enum MangroveError: LocalizedError {
             return "Compile failed: \(detail)"
         case let .zipFailed(detail):
             return "Could not unpack the project archive: \(detail)"
+        case let .zipCreateFailed(detail):
+            return "Could not create the project archive: \(detail)"
         case let .message(text):
             return text
         }

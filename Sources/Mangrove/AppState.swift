@@ -243,6 +243,12 @@ final class AppState: ObservableObject {
         openProjectId != nil && selectedProjectId != nil && !isOpeningProject
     }
 
+    /// Exporting needs a working copy but no connection: the local copy is the
+    /// project, including edits that have not reached Overleaf yet.
+    var canExportProject: Bool {
+        workspace != nil && openProjectId != nil && !isOpeningProject
+    }
+
     var selectedProjectName: String? {
         projects.first { $0.id == selectedProjectId }?.name
     }
@@ -862,13 +868,17 @@ final class AppState: ObservableObject {
 
     /// A safe file name for an exported page. Project names may contain slashes
     /// or colons, which the save panel would otherwise read as path syntax.
-    static func exportFileName(for title: String) -> String {
+    static func exportFileName(
+        for title: String,
+        fileExtension: String = "pdf",
+        fallback: String = "document"
+    ) -> String {
         let forbidden = CharacterSet(charactersIn: "/:\\?%*|\"<>")
         let cleaned = title
             .components(separatedBy: forbidden)
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (cleaned.isEmpty ? "document" : cleaned) + ".pdf"
+        return (cleaned.isEmpty ? fallback : cleaned) + "." + fileExtension
     }
 
     /// Saves the compiled page wherever the user asks. The PDF only exists once
@@ -893,6 +903,47 @@ final class AppState: ObservableObject {
             statusMessage = "Exported \(url.lastPathComponent)"
         } catch {
             present(error)
+        }
+    }
+
+    /// Writes the whole working copy to a zip the user chooses. The export holds
+    /// unsaved edits too, so it matches what is on screen and works offline.
+    func exportProjectZip() {
+        guard canExportProject, let workspace else {
+            errorMessage = "Open a project before exporting it."
+            return
+        }
+
+        // Typing is mirrored to disk after a short pause. Write the active buffer
+        // now so a quick export cannot miss the last few keystrokes.
+        if isDirty, let path = openPath {
+            workspace.saveDraft(path, text: editorText)
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Project"
+        panel.message = "Save a copy of \(projectTitle) as a zip archive."
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = Self.exportFileName(
+            for: projectTitle, fileExtension: "zip", fallback: "project"
+        )
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let root = workspace.root
+        busyMessage = "Exporting \(projectTitle)…"
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ProjectArchive.zip(contentsOf: root, to: url)
+                }.value
+                busyMessage = nil
+                statusMessage = "Exported \(url.lastPathComponent)"
+            } catch {
+                busyMessage = nil
+                present(error)
+            }
         }
     }
 

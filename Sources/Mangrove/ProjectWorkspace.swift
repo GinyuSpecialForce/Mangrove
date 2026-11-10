@@ -506,6 +506,41 @@ enum ProjectArchive {
             ProjectWorkspace.collapseSingleRootFolder(in: root)
         }
     }
+
+    /// Writes a project directory as a Finder-style zip. Its contents sit at the
+    /// archive's top level, with no enclosing folder, matching Overleaf's own
+    /// download and what `unpack(collapseSingleRoot:)` expects.
+    static func zip(contentsOf root: URL, to destination: URL) throws {
+        let manager = FileManager.default
+        // Build the archive outside the project first, so a failure cannot leave
+        // a half-written file where the user asked for one.
+        let temporary = manager.temporaryDirectory
+            .appendingPathComponent("mangrove-export-\(UUID().uuidString).zip")
+        defer { try? manager.removeItem(at: temporary) }
+
+        let ditto = Process()
+        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        ditto.arguments = ["-c", "-k", "--sequesterRsrc", root.path, temporary.path]
+        let errors = Pipe()
+        ditto.standardOutput = Pipe()
+        ditto.standardError = errors
+        try ditto.run()
+        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+        ditto.waitUntilExit()
+
+        guard ditto.terminationStatus == 0 else {
+            let detail = String(decoding: errorData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MangroveError.zipCreateFailed(
+                detail.isEmpty ? "ditto exited with \(ditto.terminationStatus)" : detail
+            )
+        }
+
+        if manager.fileExists(atPath: destination.path) {
+            try manager.removeItem(at: destination)
+        }
+        try manager.moveItem(at: temporary, to: destination)
+    }
 }
 
 /// Turns a flat list of relative paths into a sorted folder hierarchy.

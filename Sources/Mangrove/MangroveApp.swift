@@ -59,6 +59,11 @@ struct MangroveApp: App {
                     }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(state.pdfData == nil)
+
+                    Button("Export Project as Zip…") {
+                        state.exportProjectZip()
+                    }
+                    .disabled(!state.canExportProject)
                 }
 
                 // One Group keeps the menu within ViewBuilder's ten-child limit.
