@@ -177,6 +177,40 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(try workspace.readText("main.tex"), "changed")
     }
 
+    /// An exported archive must open as the same project: files at the top
+    /// level, folders intact, and no folder wrapping everything.
+    func testExportedProjectZipsItsContentsAtTheTopLevel() throws {
+        try workspace.writeText("main.tex", text: "\\documentclass{article}")
+        try workspace.writeText("sections/intro.tex", text: "\\section{Intro}")
+
+        let zipURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("export-\(UUID().uuidString).zip")
+        defer { try? FileManager.default.removeItem(at: zipURL) }
+        try ProjectArchive.zip(contentsOf: workspace.root, to: zipURL)
+
+        let unpacked = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mangrove-export-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: unpacked) }
+        try ProjectArchive.unpack(
+            try Data(contentsOf: zipURL), into: unpacked, collapseSingleRoot: false
+        )
+
+        XCTAssertEqual(
+            try String(contentsOf: unpacked.appendingPathComponent("main.tex"), encoding: .utf8),
+            "\\documentclass{article}"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: unpacked.appendingPathComponent("sections/intro.tex"), encoding: .utf8),
+            "\\section{Intro}"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: unpacked.appendingPathComponent(workspace.root.lastPathComponent).path
+            ),
+            "the archive must not wrap the project in an enclosing folder"
+        )
+    }
+
     func testMovingAFolderCarriesPendingEditsAndBases() throws {
         try workspace.writeText("main.tex", text: "first")
         workspace.saveBase("main.tex", data: Data("base".utf8))
